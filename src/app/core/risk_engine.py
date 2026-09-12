@@ -227,6 +227,19 @@ def format_pc(pc: float) -> str:
     return f"{pc:.2e}"
 
 
+def priority_score(pc: float, time_to_tca_hours: float) -> float:
+    """
+    The 0-100 operator priority score.
+
+    Pc sets the magnitude; urgency modulates it by up to 25% relative. Urgency
+    alone can never manufacture risk where the probability is negligible, which
+    is the point of multiplying rather than adding.
+    """
+    pc_norm = _normalise_log_pc(pc)
+    urgency = _normalise_urgency(time_to_tca_hours)
+    return float(np.clip(100.0 * pc_norm * (0.80 + 0.20 * urgency), 0.0, 100.0))
+
+
 def severity_for_pc(pc: float) -> str:
     """Classify a collision probability into an operator-facing severity band."""
     if pc >= PC_THRESHOLD_CRITICAL:
@@ -273,6 +286,7 @@ class RiskEngine:
         primary_age_days: Optional[float] = None,
         secondary_age_days: Optional[float] = None,
         combined_hbr_m: Optional[float] = None,
+        method: str = "foster",
     ) -> PcResult:
         """
         Evaluate Pc, optionally overriding one input for a counterfactual.
@@ -326,8 +340,18 @@ class RiskEngine:
             cov_2,
             hard_body_radius_1_m=hbr_1,
             hard_body_radius_2_m=hbr_2,
-            method="foster",
+            method=method,
         )
+
+    def probability(self, conjunction: ConjunctionInput, method: str = "foster") -> PcResult:
+        """
+        Collision probability alone, without scoring or explanation.
+
+        Pass method="chan" when evaluating many hypotheticals, such as a grid of
+        maneuver candidates: the analytic series agrees with the quadrature to
+        about twelve significant figures and is far cheaper.
+        """
+        return self._pc_for(conjunction, method=method)
 
     def assess(self, conjunction: ConjunctionInput) -> RiskAssessment:
         """
@@ -342,14 +366,7 @@ class RiskEngine:
         pc_result = self._pc_for(conjunction)
         pc = pc_result.pc
 
-        pc_norm = _normalise_log_pc(pc)
-        urgency = _normalise_urgency(conjunction.time_to_tca_hours)
-
-        # Pc sets the magnitude; urgency modulates it by up to 25% relative.
-        # Urgency alone can never manufacture risk where the probability is
-        # negligible, which is the point of multiplying rather than adding.
-        risk_score = 100.0 * pc_norm * (0.80 + 0.20 * urgency)
-        risk_score = float(np.clip(risk_score, 0.0, 100.0))
+        risk_score = priority_score(pc, conjunction.time_to_tca_hours)
 
         factors = self._explain(conjunction, pc)
 
@@ -521,7 +538,7 @@ class RiskEngine:
         if reducing:
             worst = min(reducing, key=lambda f: f.log10_delta)
             parts.append(
-                f"Note that {worst.display_name.lower()} is currently *lowering* the "
+                f"Note that {worst.display_name.lower()} is currently lowering the "
                 f"probability through uncertainty dilution: {worst.explanation}"
             )
 
@@ -538,6 +555,20 @@ class RiskEngine:
             "approach affects response time, not likelihood."
         )
         return " ".join(parts)
+
+    def retime(self, assessment: RiskAssessment, time_to_tca_hours: float) -> RiskAssessment:
+        """
+        Update an assessment for the passage of time, without recomputing Pc.
+
+        Time to closest approach does not enter the probability, so as a
+        conjunction draws nearer only the urgency-dependent score and the
+        narrative change. This avoids re-running the quadrature -- and the
+        counterfactual re-evaluations -- every time a dashboard refreshes.
+        """
+        assessment.time_to_tca_hours = time_to_tca_hours
+        assessment.risk_score = priority_score(assessment.pc, time_to_tca_hours)
+        assessment.narrative = self._narrate(assessment)
+        return assessment
 
     # -- batch operations --------------------------------------------------
 

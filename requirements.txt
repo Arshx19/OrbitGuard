@@ -23,6 +23,7 @@ scipy>=1.11,<2
 
 # --- Testing ------------------------------------------------------------------
 pytest>=8.0
+httpx>=0.27  # required by fastapi.testclient for the API tests
 
 # --- Web API (needed once src/app/main.py and the v1 routes are implemented) ---
 fastapi>=0.110
@@ -53,6 +54,6 @@ flake8>=7.0
 # the natural candidate.
 #
 # pandas, sqlalchemy, alembic, python-dotenv, loguru, python-multipart,
-# email-validator, pytest-asyncio, httpx and mypy were also unused: a repo-wide
+# email-validator, pytest-asyncio and mypy were also unused: a repo-wide
 # scan of every import statement found no reference to any of them. They can
 # come back when something actually imports them.
