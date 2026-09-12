@@ -1,45 +1,58 @@
-# To install: pip install -r requirements.txt
-# Core web framework
-fastapi==0.104.1
-uvicorn[standard]==0.27.0
+# ORBITGUARD AI -- Python dependencies
+#
+# Requires Python 3.12. Do not use 3.13 or 3.14: several pinned scientific
+# packages have no wheels for those versions yet and will try to build from
+# source, which fails on a stock Windows machine.
+#
+#   python -m venv .venv
+#   .venv/Scripts/python.exe -m pip install -r requirements.txt     # Windows
+#   .venv/bin/python -m pip install -r requirements.txt             # macOS/Linux
+#
+# Verified working: numpy 2.5.3, scipy 1.18.1, sgp4 2.25 on CPython 3.12.10.
 
-# Orbital mechanics
-sgp4==1.4
-numpy==1.26.2
-scipy==1.13.0
+# --- Orbital mechanics (required -- the core engine will not import without) --
+#
+# sgp4 MUST be 2.x. Every module in this repo imports `sgp4.api` (Satrec, jday,
+# WGS72), which was introduced in sgp4 2.0. The previous pin of 1.4 predates
+# that module entirely -- 1.x exposed `sgp4.earth_gravity` and `sgp4.io` instead
+# -- so a clean install produced an environment in which none of our own code
+# could be imported. Do not pin this below 2.0.
+sgp4>=2.23,<3
+numpy>=1.26,<3
+scipy>=1.11,<2
 
-# Data handling
-pandas==2.2.1
+# --- Testing ------------------------------------------------------------------
+pytest>=8.0
 
-# Machine learning & explainability
-scikit-learn==1.4.1.post1
-shap==0.45.1
+# --- Web API (needed once src/app/main.py and the v1 routes are implemented) ---
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
 
-# API & data validation
-pydantic==2.6.3
-python-multipart==0.0.9
-email-validator==2.1.0
+# --- TLE ingestion over HTTP --------------------------------------------------
+# For fetching element sets from CelesTrak. Note that
+# TLELoader.load_tle_from_url is currently a stub raising NotImplementedError,
+# so nothing imports this yet.
+requests>=2.31
 
-# Database (optional, using SQLite for prototype)
-sqlalchemy==2.0.29
-alembic==1.13.1
+# --- Development tools (optional) ---------------------------------------------
+black>=24.3
+isort>=5.13
+flake8>=7.0
 
-# Environment management
-python-dotenv==1.0.1
-
-# HTTP requests (for downloading TLE data)
-requests==2.31.0
-
-# Logging (optional but useful)
-loguru==0.7.2
-
-# Testing (for CI/local)
-pytest==8.2.2
-pytest-asyncio==0.23.6
-httpx==0.27.0  # for async test client
-
-# Development tools
-black==24.3.0
-isort==5.13.2
-flake8==7.0.0
-mypy==1.8.0
+# --- Removed ------------------------------------------------------------------
+#
+# scikit-learn and shap were dropped when the risk engine stopped being a
+# classifier. The old engine trained a RandomForest on synthetic data and ran
+# SHAP over it; collision probability is now computed directly from orbital
+# geometry (see app/core/collision_probability.py) and explained by
+# counterfactual re-evaluation, so neither package has a consumer. shap in
+# particular is a heavy dependency with a fragile build, and carrying it for an
+# unused import costs everyone install time. Re-add them if a genuine learned
+# model lands -- fitting the TLE uncertainty coefficients empirically would be
+# the natural candidate.
+#
+# pandas, sqlalchemy, alembic, python-dotenv, loguru, python-multipart,
+# email-validator, pytest-asyncio, httpx and mypy were also unused: a repo-wide
+# scan of every import statement found no reference to any of them. They can
+# come back when something actually imports them.
