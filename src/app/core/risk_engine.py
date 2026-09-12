@@ -1,622 +1,656 @@
 """
-Risk assessment module for ORBITGUARD AI.
-Calculates collision risk probabilities and provides explainability using ML models and SHAP.
+Risk assessment and explainability for ORBITGUARD AI.
+
+This module turns a detected conjunction into three things an operator actually
+needs: a physically meaningful probability of collision, a 0-100 priority score
+for triaging a queue of events, and a breakdown of *why* the event scores the
+way it does.
+
+Design notes, since the approach here is deliberate:
+
+**The probability is computed, not predicted.** Pc comes from Foster's 2D method
+(see `collision_probability`), the same technique used in operational conjunction
+assessment. It is not the output of a classifier. This matters because a number
+labelled "probability of collision" will be read as one, and a model confidence
+score is not a probability of anything physical.
+
+**The explanation is counterfactual, not attributional.** Rather than running
+SHAP over a model, each factor's contribution is measured by recomputing Pc with
+that factor reset to a benign baseline and reporting how far the probability
+moves. So "ephemeris uncertainty contributes 38%" unpacks to a concrete,
+checkable claim: *if both TLEs were fresh, Pc would fall from 2.3e-4 to 8.1e-6.*
+That is explainable in a way a feature-importance bar chart over a synthetic
+training set is not, and it cannot drift out of agreement with the underlying
+physics, because it *is* the underlying physics evaluated twice.
+
+**Urgency is kept separate from probability.** Time to closest approach does not
+change how likely a collision is; it changes how much time an operator has to do
+something about it. Conflating the two produces a score claiming a distant
+conjunction is physically safer than an identical imminent one. Here Pc drives
+the score and urgency modulates it, and the distinction is stated in the output.
 """
 
-import logging
-import numpy as np
-from typing import List, Tuple, Optional, Dict, Any, Union
-from datetime import datetime
-import pickle
-import os
+from __future__ import annotations
 
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import StandardScaler
-import shap
+import logging
+import math
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, List, Optional, Sequence
+
+import numpy as np
+
+from app.core.collision_probability import PcResult, collision_probability
+from app.core.uncertainty import (
+    TLEUncertaintyModel,
+    covariance_for_object,
+    hard_body_radius_for,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class RiskFeatures:
-    """Container for risk assessment features."""
+# Severity thresholds on Pc. These follow common operator practice, where a
+# collision probability around 1e-4 is the point at which an avoidance maneuver
+# is normally considered. They are policy, not physics, and are stated here in
+# one place so they can be argued with directly.
+PC_THRESHOLD_CRITICAL = 1e-4
+PC_THRESHOLD_HIGH = 1e-5
+PC_THRESHOLD_AMBER = 1e-6
 
-    def __init__(self):
-        self.miss_distance: Optional[float] = None  # km
-        self.relative_speed: Optional[float] = None  # km/s
-        self.radial_velocity: Optional[float] = None  # km/s (negative = approaching)
-        self.tangential_speed: Optional[float] = None  # km/s
-        self.approach_angle: Optional[float] = None  # degrees
-        self.time_to_tca: Optional[float] = None  # hours until TCA
-        self.satellite_size_factor: Optional[float] = None  # Combined size/risk factor
-        self.orbital_altitude: Optional[float] = None  # km
-        self.orbital_inclination: Optional[float] = None  # degrees
-        self.space_weather_factor: Optional[float] = None  # Based on KP-index, etc.
+# Range over which log10(Pc) is mapped onto the 0-100 score.
+_LOG_PC_FLOOR = -9.0  # at or below this, the Pc contribution is zero
+_LOG_PC_CEILING = -3.0  # at or above this, the Pc contribution saturates
 
-        # Derived features
-        self.collision_probability: Optional[float] = None
-        self.risk_level: Optional[str] = None  # 'low', 'medium', 'high', 'critical'
+# Urgency ramp, in hours to closest approach.
+_URGENCY_FULL_HOURS = 2.0  # at or inside this, urgency is maximal
+_URGENCY_ZERO_HOURS = 72.0  # at or beyond this, urgency contributes nothing
 
-    def to_array(self) -> np.ndarray:
-        """Convert features to numpy array for ML model input."""
-        # Handle missing values
-        features = [
-            self.miss_distance if self.miss_distance is not None else 999.0,
-            self.relative_speed if self.relative_speed is not None else 0.0,
-            abs(self.radial_velocity) if self.radial_velocity is not None else 0.0,
-            self.tangential_speed if self.tangential_speed is not None else 0.0,
-            self.approach_angle if self.approach_angle is not None else 90.0,
-            self.time_to_tca if self.time_to_tca is not None else 999.0,
-            self.satellite_size_factor if self.satellite_size_factor is not None else 1.0,
-            self.orbital_altitude if self.orbital_altitude is not None else 500.0,
-            self.orbital_inclination if self.orbital_inclination is not None else 0.0,
-            self.space_weather_factor if self.space_weather_factor is not None else 1.0
-        ]
-        return np.array(features).reshape(1, -1)
+# Floor for reported probabilities. Foster's method will happily return 1e-34
+# for a counterfactual twenty sigma into the tail of a Gaussian, but that figure
+# is not a credible estimate of anything: it is the assumed shape of the
+# distribution extrapolated far past where the assumption holds. Operational
+# conjunction assessment does not quote probabilities below roughly 1e-10, so
+# anything smaller is reported as "below the floor" rather than as a number.
+PC_REPORTING_FLOOR = 1e-12
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert features to dictionary."""
+
+@dataclass
+class ConjunctionInput:
+    """
+    Everything the risk engine needs about one conjunction.
+
+    All state vectors are inertial (TEME, as returned by SGP4) and evaluated at
+    the time of closest approach.
+    """
+
+    primary_position_km: np.ndarray
+    primary_velocity_kms: np.ndarray
+    secondary_position_km: np.ndarray
+    secondary_velocity_kms: np.ndarray
+
+    time_to_tca_hours: float
+    """Hours from now until closest approach. Drives urgency, not probability."""
+
+    primary_tle_age_days: float = 0.0
+    secondary_tle_age_days: float = 0.0
+
+    primary_object_class: str = "typical_leo_satellite"
+    secondary_object_class: str = "debris_fragment"
+
+    primary_uncertainty_regime: Optional[str] = None
+    secondary_uncertainty_regime: Optional[str] = None
+    """Which learned error-growth regime applies to each object, if the engine
+    has learned models. None falls back to the engine's default model."""
+
+    primary_id: Optional[int] = None
+    secondary_id: Optional[int] = None
+    tca: Optional[datetime] = None
+
+    def relative_position_km(self) -> np.ndarray:
+        return np.asarray(self.primary_position_km, dtype=np.float64) - np.asarray(
+            self.secondary_position_km, dtype=np.float64
+        )
+
+    def relative_velocity_kms(self) -> np.ndarray:
+        return np.asarray(self.primary_velocity_kms, dtype=np.float64) - np.asarray(
+            self.secondary_velocity_kms, dtype=np.float64
+        )
+
+
+@dataclass
+class FactorContribution:
+    """One counterfactual explanation of the risk score."""
+
+    name: str
+    display_name: str
+    contribution_percent: float
+    """Share of the total risk elevation attributable to this factor."""
+
+    counterfactual_pc: float
+    """What Pc would be if this factor were at its benign baseline."""
+
+    log10_delta: float
+    """log10(Pc_actual) - log10(Pc_counterfactual). Positive means risk-raising."""
+
+    explanation: str
+    """A sentence stating the counterfactual in plain language."""
+
+    direction: str = "raises"
+    """Whether this factor currently raises or reduces the probability.
+
+    A factor can genuinely reduce it. Large ephemeris uncertainty spreads the
+    probability distribution out, and past a point that *lowers* Pc rather than
+    raising it -- the dilution effect. Reporting such a factor as a zero
+    contribution would hide a real and counterintuitive finding, so it is
+    labelled instead.
+    """
+
+    def to_dict(self) -> Dict[str, object]:
         return {
-            'miss_distance_km': self.miss_distance,
-            'relative_speed_kms': self.relative_speed,
-            'radial_velocity_kms': self.radial_velocity,
-            'tangential_speed_kms': self.tangential_speed,
-            'approach_angle_degrees': self.approach_angle,
-            'time_to_tca_hours': self.time_to_tca,
-            'satellite_size_factor': self.satellite_size_factor,
-            'orbital_altitude_km': self.orbital_altitude,
-            'orbital_inclination_degrees': self.orbital_inclination,
-            'space_weather_factor': self.space_weather_factor,
-            'collision_probability': self.collision_probability,
-            'risk_level': self.risk_level
+            "name": self.name,
+            "display_name": self.display_name,
+            "contribution_percent": self.contribution_percent,
+            "counterfactual_pc": self.counterfactual_pc,
+            "log10_delta": self.log10_delta,
+            "direction": self.direction,
+            "explanation": self.explanation,
         }
 
 
-class CollisionRiskModel:
-    """Machine learning model for collision risk assessment."""
+@dataclass
+class RiskAssessment:
+    """The full risk picture for one conjunction."""
 
-    def __init__(self, model_path: Optional[str] = None):
-        """
-        Initialize risk model.
+    pc: float
+    risk_score: float
+    """0-100 operator priority score."""
 
-        Args:
-            model_path: Path to pre-trained model file (optional)
-        """
-        self.model = RandomForestClassifier(
-            n_estimators=100,
-            max_depth=10,
-            random_state=42,
-            class_weight='balanced'
-        )
-        self.scaler = StandardScaler()
-        self.is_trained = False
-        self.feature_names = [
-            'miss_distance_km', 'relative_speed_kms', 'radial_velocity_kms',
-            'tangential_speed_kms', 'approach_angle_degrees', 'time_to_tca_hours',
-            'satellite_size_factor', 'orbital_altitude_km', 'orbital_inclination_degrees',
-            'space_weather_factor'
-        ]
-        self.logger = logging.getLogger(__name__)
+    severity: str
+    """GREEN / AMBER / HIGH / CRITICAL, keyed to Pc thresholds."""
 
-        if model_path and os.path.exists(model_path):
-            self.load_model(model_path)
+    miss_distance_km: float
+    relative_speed_kms: float
+    time_to_tca_hours: float
+    combined_hbr_m: float
 
-    def train_model(self, X: np.ndarray, y: np.ndarray) -> None:
-        """
-        Train the risk assessment model.
+    pc_result: PcResult
+    factors: List[FactorContribution] = field(default_factory=list)
+    uncertainty_summary: Dict[str, float] = field(default_factory=dict)
+    narrative: str = ""
+    primary_id: Optional[int] = None
+    secondary_id: Optional[int] = None
 
-        Args:
-            X: Feature matrix of shape (n_samples, n_features)
-            y: Binary labels (0 = safe, 1 = collision risk)
-        """
-        try:
-            # Scale features
-            X_scaled = self.scaler.fit_transform(X)
+    def to_dict(self) -> Dict[str, object]:
+        return {
+            "primary_id": self.primary_id,
+            "secondary_id": self.secondary_id,
+            "collision_probability": self.pc,
+            "risk_score": self.risk_score,
+            "severity": self.severity,
+            "miss_distance_km": self.miss_distance_km,
+            "relative_speed_kms": self.relative_speed_kms,
+            "time_to_tca_hours": self.time_to_tca_hours,
+            "combined_hbr_m": self.combined_hbr_m,
+            "factors": [f.to_dict() for f in self.factors],
+            "uncertainty": self.uncertainty_summary,
+            "narrative": self.narrative,
+            "pc_detail": self.pc_result.to_dict(),
+        }
 
-            # Train model
-            self.model.fit(X_scaled, y)
-            self.is_trained = True
 
-            self.logger.info(f"Risk model trained on {X.shape[0]} samples with {X.shape[1]} features")
-            self.logger.info(f"Feature importances: {dict(zip(self.feature_names, self.model.feature_importances_))}")
+def _normalise_log_pc(pc: float) -> float:
+    """Map Pc onto [0, 1] through its logarithm."""
+    if pc <= 0.0:
+        return 0.0
+    log_pc = math.log10(pc)
+    span = _LOG_PC_CEILING - _LOG_PC_FLOOR
+    return float(np.clip((log_pc - _LOG_PC_FLOOR) / span, 0.0, 1.0))
 
-        except Exception as e:
-            self.logger.error(f"Error training risk model: {e}")
-            raise
 
-    def predict_risk(self, features: RiskFeatures) -> Tuple[float, str]:
-        """
-        Predict collision risk probability and risk level.
+def _normalise_urgency(hours_to_tca: float) -> float:
+    """Map time-to-TCA onto [0, 1], with sooner meaning more urgent."""
+    hours = max(0.0, float(hours_to_tca))
+    if hours <= _URGENCY_FULL_HOURS:
+        return 1.0
+    if hours >= _URGENCY_ZERO_HOURS:
+        return 0.0
+    span = _URGENCY_ZERO_HOURS - _URGENCY_FULL_HOURS
+    return float((_URGENCY_ZERO_HOURS - hours) / span)
 
-        Args:
-            features: RiskFeatures object containing assessment data
 
-        Returns:
-            Tuple of (collision_probability, risk_level)
-        """
-        if not self.is_trained:
-            self.logger.warning("Model not trained, using heuristic risk assessment")
-            return self._heuristic_risk_assessment(features)
+def format_pc(pc: float) -> str:
+    """
+    Render a probability for display, respecting the reporting floor.
 
-        try:
-            # Prepare features
-            X = features.to_array()
-            X_scaled = self.scaler.transform(X)
+    Values below `PC_REPORTING_FLOOR` are shown as an upper bound rather than a
+    figure, because quoting them precisely would imply confidence the method
+    does not have that far into the tail.
+    """
+    if pc < PC_REPORTING_FLOOR:
+        return f"below {PC_REPORTING_FLOOR:.0e}"
+    return f"{pc:.2e}"
 
-            # Get prediction probabilities
-            probabilities = self.model.predict_proba(X_scaled)[0]
-            collision_probability = float(probabilities[1])  # Probability of class 1 (risk)
 
-            # Determine risk level based on probability thresholds
-            if collision_probability < 0.1:
-                risk_level = 'low'
-            elif collision_probability < 0.3:
-                risk_level = 'medium'
-            elif collision_probability < 0.7:
-                risk_level = 'high'
-            else:
-                risk_level = 'critical'
+def priority_score(pc: float, time_to_tca_hours: float) -> float:
+    """
+    The 0-100 operator priority score.
 
-            return collision_probability, risk_level
+    Pc sets the magnitude; urgency modulates it by up to 25% relative. Urgency
+    alone can never manufacture risk where the probability is negligible, which
+    is the point of multiplying rather than adding.
+    """
+    pc_norm = _normalise_log_pc(pc)
+    urgency = _normalise_urgency(time_to_tca_hours)
+    return float(np.clip(100.0 * pc_norm * (0.80 + 0.20 * urgency), 0.0, 100.0))
 
-        except Exception as e:
-            self.logger.error(f"Error in risk prediction: {e}")
-            return self._heuristic_risk_assessment(features)
 
-    def _heuristic_risk_assessment(self, features: RiskFeatures) -> Tuple[float, str]:
-        """
-        Fallback heuristic risk assessment when ML model is not available.
-
-        Args:
-            features: RiskFeatures object
-
-        Returns:
-            Tuple of (collision_probability, risk_level)
-        """
-        # Simple heuristic based on miss distance and relative speed
-        miss_distance = features.miss_distance or 999.0
-        relative_speed = features.relative_speed or 0.0
-        radial_velocity = abs(features.radial_velocity or 0.0)
-
-        # Base risk inversely proportional to miss distance
-        distance_risk = max(0, min(1, (10.0 - miss_distance) / 10.0))  # 0-10 km range
-
-        # Speed risk increases with relative speed
-        speed_risk = min(1, relative_speed / 20.0)  # Normalize by 20 km/s
-
-        # Approach risk (head-on is worse)
-        approach_risk = min(1, radial_velocity / 10.0) if radial_velocity > 0 else 0.0
-
-        # Combined risk score
-        risk_score = (distance_risk * 0.5 + speed_risk * 0.3 + approach_risk * 0.2)
-        risk_score = max(0, min(1, risk_score))  # Clamp to 0-1
-
-        # Convert to risk level
-        if risk_score < 0.1:
-            risk_level = 'low'
-        elif risk_score < 0.3:
-            risk_level = 'medium'
-        elif risk_score < 0.7:
-            risk_level = 'high'
-        else:
-            risk_level = 'critical'
-
-        return float(risk_score), risk_level
-
-    def explain_prediction(self, features: RiskFeatures) -> Dict[str, Any]:
-        """
-        Generate SHAP explanation for risk prediction.
-
-        Args:
-            features: RiskFeatures object to explain
-
-        Returns:
-            Dictionary containing SHAP values and explanation data
-        """
-        if not self.is_trained:
-            self.logger.warning("Model not trained, cannot provide SHAP explanation")
-            return {'error': 'Model not trained'}
-
-        try:
-            # Prepare features
-            X = features.to_array()
-            X_scaled = self.scaler.transform(X)
-
-            # Create SHAP explainer
-            explainer = shap.TreeExplainer(self.model)
-            shap_values = explainer.shap_values(X_scaled)
-
-            # Get expected value and shap values for class 1 (risk)
-            if isinstance(explainer.expected_value, (list, np.ndarray)):
-                expected_value = explainer.expected_value[1]
-            else:
-                expected_value = explainer.expected_value
-
-            if isinstance(shap_values, list):
-                shap_vals = shap_values[1][0]
-            elif isinstance(shap_values, np.ndarray) and shap_values.ndim == 3:
-                shap_vals = shap_values[0, :, 1]
-            elif isinstance(shap_values, np.ndarray) and shap_values.ndim == 2:
-                shap_vals = shap_values[0]
-            else:
-                shap_vals = shap_values
-
-            # Create explanation dictionary
-            explanation = {
-                'expected_value': float(expected_value),
-                'shap_values': dict(zip(self.feature_names, shap_vals.tolist())),
-                'feature_values': dict(zip(self.feature_names, X[0].tolist())),
-                'prediction_probability': float(self.model.predict_proba(X_scaled)[0][1])
-            }
-
-            return explanation
-
-        except Exception as e:
-            self.logger.error(f"Error generating SHAP explanation: {e}")
-            return {'error': str(e)}
-
-    def save_model(self, filepath: str) -> None:
-        """
-        Save trained model to file.
-
-        Args:
-            filepath: Path to save model
-        """
-        if not self.is_trained:
-            self.logger.warning("Cannot save untrained model")
-            return
-
-        try:
-            model_data = {
-                'model': self.model,
-                'scaler': self.scaler,
-                'feature_names': self.feature_names,
-                'is_trained': self.is_trained
-            }
-            with open(filepath, 'wb') as f:
-                pickle.dump(model_data, f)
-            self.logger.info(f"Model saved to {filepath}")
-        except Exception as e:
-            self.logger.error(f"Error saving model: {e}")
-
-    def load_model(self, filepath: str) -> None:
-        """
-        Load trained model from file.
-
-        Args:
-            filepath: Path to load model from
-        """
-        try:
-            with open(filepath, 'rb') as f:
-                model_data = pickle.load(f)
-
-            self.model = model_data['model']
-            self.scaler = model_data['scaler']
-            self.feature_names = model_data['feature_names']
-            self.is_trained = model_data['is_trained']
-
-            self.logger.info(f"Model loaded from {filepath}")
-        except Exception as e:
-            self.logger.error(f"Error loading model: {e}")
-            # Reset to default state
-            self.__init__()
+def severity_for_pc(pc: float) -> str:
+    """Classify a collision probability into an operator-facing severity band."""
+    if pc >= PC_THRESHOLD_CRITICAL:
+        return "CRITICAL"
+    if pc >= PC_THRESHOLD_HIGH:
+        return "HIGH"
+    if pc >= PC_THRESHOLD_AMBER:
+        return "AMBER"
+    return "GREEN"
 
 
 class RiskEngine:
-    """Main risk assessment engine for ORBITGUARD AI."""
+    """
+    Computes collision probability, priority score, and counterfactual factors.
 
-    def __init__(self, model_path: Optional[str] = None):
-        """
-        Initialize risk engine.
+    Args:
+        uncertainty_model: Model governing how TLE position error grows with
+            propagation age. The default is a documented assumption; see
+            `app.core.uncertainty` for why one is needed at all.
+        uncertainty_models: Learned models keyed by regime, as returned by
+            `app.core.uncertainty.learned_models()`. When given, each object's
+            covariance comes from the model for its regime; objects with no
+            regime, or a regime without a model, use `uncertainty_model`.
+        benign_miss_distance_km: The miss distance a conjunction is compared
+            against when explaining how much proximity contributes.
+        benign_combined_hbr_m: The combined hard-body radius used as the "small
+            objects" baseline when explaining the size contribution.
+    """
 
-        Args:
-            model_path: Path to pre-trained risk model (optional)
-        """
-        self.collision_model = CollisionRiskModel(model_path)
+    def __init__(
+        self,
+        uncertainty_model: Optional[TLEUncertaintyModel] = None,
+        benign_miss_distance_km: float = 10.0,
+        benign_combined_hbr_m: float = 1.0,
+        uncertainty_models: Optional[Dict[str, TLEUncertaintyModel]] = None,
+    ):
+        self.uncertainty_model = uncertainty_model or TLEUncertaintyModel()
+        self.uncertainty_models = dict(uncertainty_models or {})
+        self.benign_miss_distance_km = benign_miss_distance_km
+        self.benign_combined_hbr_m = benign_combined_hbr_m
         self.logger = logging.getLogger(__name__)
 
-    def assess_conjunction_risk(
+    # -- core assessment ---------------------------------------------------
+
+    def _pc_for(
         self,
-        conjunction_result,
-        satellite1_params: Optional[Dict[str, Any]] = None,
-        satellite2_params: Optional[Dict[str, Any]] = None
-    ) -> RiskFeatures:
+        conjunction: ConjunctionInput,
+        *,
+        relative_position_km: Optional[np.ndarray] = None,
+        primary_age_days: Optional[float] = None,
+        secondary_age_days: Optional[float] = None,
+        combined_hbr_m: Optional[float] = None,
+        method: str = "foster",
+    ) -> PcResult:
         """
-        Assess risk for a detected conjunction.
+        Evaluate Pc, optionally overriding one input for a counterfactual.
 
-        Args:
-            conjunction_result: ConjunctionResult object from conjunction detection
-            satellite1_params: Parameters for satellite 1 (size, altitude, etc.)
-            satellite2_params: Parameters for satellite 2 (size, altitude, etc.)
-
-        Returns:
-            RiskFeatures object with risk assessment
+        Keeping every counterfactual on this single code path is what guarantees
+        the explanation stays consistent with the headline number: both come from
+        the same calculation with the same assumptions.
         """
-        features = RiskFeatures()
+        r_rel = (
+            conjunction.relative_position_km()
+            if relative_position_km is None
+            else relative_position_km
+        )
+        v_rel = conjunction.relative_velocity_kms()
 
-        # Extract basic conjunction data
-        features.miss_distance = conjunction_result.miss_distance
-        features.time_to_tca = None  # Would need current time to calculate
-
-        # Calculate conjunction geometry if velocities available
-        if (conjunction_result.velocity1 is not None and
-            conjunction_result.velocity2 is not None and
-            conjunction_result.position1 is not None and
-            conjunction_result.position2 is not None):
-
-            geometry = self._calculate_conjunction_geometry(
-                conjunction_result.position1,
-                conjunction_result.position2,
-                conjunction_result.velocity1,
-                conjunction_result.velocity2
-            )
-
-            features.relative_speed = geometry.get('relative_speed_kms')
-            features.radial_velocity = geometry.get('radial_velocity_kms')
-            features.tangential_speed = geometry.get('tangential_speed_kms')
-            features.approach_angle = geometry.get('approach_angle_degrees')
-
-        # Estimate satellite parameters if not provided
-        if satellite1_params is None:
-            satellite1_params = self._estimate_satellite_params(conjunction_result.satellite1_id)
-        if satellite2_params is None:
-            satellite2_params = self._estimate_satellite_params(conjunction_result.satellite2_id)
-
-        # Calculate combined satellite size factor
-        size1 = satellite1_params.get('size_m2', 10.0)  # Default 10 m²
-        size2 = satellite2_params.get('size_m2', 10.0)
-        features.satellite_size_factor = np.sqrt(size1 * size2) / 10.0  # Normalize
-
-        # Calculate average orbital altitude
-        alt1 = satellite1_params.get('altitude_km', 500.0)
-        alt2 = satellite2_params.get('altitude_km', 500.0)
-        features.orbital_altitude = (alt1 + alt2) / 2.0
-
-        # Calculate average inclination
-        inc1 = satellite1_params.get('inclination_deg', 0.0)
-        inc2 = satellite2_params.get('inclination_deg', 0.0)
-        features.orbital_inclination = abs(inc1 - inc2) / 2.0  # Relative inclination
-
-        # Space weather factor (simplified - would use real KP-index data in production)
-        features.space_weather_factor = 1.0  # Nominal conditions
-
-        # Assess risk using ML model
-        collision_probability, risk_level = self.collision_model.predict_risk(features)
-        features.collision_probability = collision_probability
-        features.risk_level = risk_level
-
-        self.logger.info(
-            f"Risk assessment for conjunction {conjunction_result.satellite1_id}-{conjunction_result.satellite2_id}: "
-            f"P(collision)={collision_probability:.4f}, Level={risk_level}"
+        age_1 = (
+            conjunction.primary_tle_age_days
+            if primary_age_days is None
+            else primary_age_days
+        )
+        age_2 = (
+            conjunction.secondary_tle_age_days
+            if secondary_age_days is None
+            else secondary_age_days
         )
 
-        return features
+        cov_1 = covariance_for_object(
+            conjunction.primary_position_km,
+            conjunction.primary_velocity_kms,
+            age_1,
+            self.model_for(conjunction.primary_uncertainty_regime),
+        )
+        cov_2 = covariance_for_object(
+            conjunction.secondary_position_km,
+            conjunction.secondary_velocity_kms,
+            age_2,
+            self.model_for(conjunction.secondary_uncertainty_regime),
+        )
 
-    def _calculate_conjunction_geometry(
-        self,
-        position1: np.ndarray,
-        position2: np.ndarray,
-        velocity1: np.ndarray,
-        velocity2: np.ndarray
-    ) -> Dict[str, Any]:
-        """Calculate conjunction geometry from state vectors."""
-        # Miss distance vector (from sat2 to sat1)
-        miss_vector = position1 - position2
-        miss_distance = np.linalg.norm(miss_vector)
-        miss_unit_vector = miss_vector / miss_distance if miss_distance > 0 else np.zeros(3)
-
-        # Relative velocity
-        relative_velocity = velocity1 - velocity2
-        relative_speed = np.linalg.norm(relative_velocity)
-
-        # Radial velocity component (negative = approaching)
-        radial_velocity = np.dot(relative_velocity, miss_unit_vector)
-
-        # Tangential velocity
-        tangential_velocity = relative_velocity - radial_velocity * miss_unit_vector
-        tangential_speed = np.linalg.norm(tangential_velocity)
-
-        # Approach angle
-        if relative_speed > 0 and miss_distance > 0:
-            approach_angle = np.degrees(np.arccos(
-                np.clip(np.dot(relative_velocity, miss_vector) / (relative_speed * miss_distance), -1, 1)
-            ))
+        if combined_hbr_m is None:
+            hbr_1 = hard_body_radius_for(conjunction.primary_object_class)
+            hbr_2 = hard_body_radius_for(conjunction.secondary_object_class)
         else:
-            approach_angle = 0.0
+            # Split the override evenly; only the sum enters the calculation.
+            hbr_1 = hbr_2 = combined_hbr_m / 2.0
 
-        return {
-            'miss_distance_km': float(miss_distance),
-            'relative_speed_kms': float(relative_speed),
-            'radial_velocity_kms': float(radial_velocity),
-            'tangential_speed_kms': float(tangential_speed),
-            'approach_angle_degrees': float(approach_angle),
-            'is_approaching': radial_velocity < 0
-        }
+        return collision_probability(
+            r_rel,
+            v_rel,
+            cov_1,
+            cov_2,
+            hard_body_radius_1_m=hbr_1,
+            hard_body_radius_2_m=hbr_2,
+            method=method,
+        )
 
-    def _estimate_satellite_params(self, satellite_id: int) -> Dict[str, Any]:
+    def model_for(self, regime: Optional[str]) -> TLEUncertaintyModel:
+        """The uncertainty model for a regime, falling back to the default."""
+        if regime is not None and regime in self.uncertainty_models:
+            return self.uncertainty_models[regime]
+        return self.uncertainty_model
+
+    def probability(self, conjunction: ConjunctionInput, method: str = "foster") -> PcResult:
         """
-        Estimate satellite parameters based on ID or catalog data.
-        In production, this would query a satellite catalog database.
+        Collision probability alone, without scoring or explanation.
+
+        Pass method="chan" when evaluating many hypotheticals, such as a grid of
+        maneuver candidates: the analytic series agrees with the quadrature to
+        about twelve significant figures and is far cheaper.
         """
-        # Simple estimation based on ID ranges (for demonstration)
-        # In reality, this would look up actual satellite characteristics
+        return self._pc_for(conjunction, method=method)
 
-        # Default parameters
-        params = {
-            'size_m2': 10.0,          # Cross-sectional area in m²
-            'altitude_km': 500.0,     # Orbital altitude in km
-            'inclination_deg': 0.0,   # Orbital inclination in degrees
-            'mass_kg': 1000.0         # Mass in kg
-        }
-
-        # Adjust based on satellite ID ranges (crude estimation)
-        if satellite_id < 1000:
-            # Early satellites - tend to be larger
-            params['size_m2'] = 50.0
-            params['mass_kg'] = 5000.0
-        elif satellite_id < 5000:
-            # Middle era - moderate size
-            params['size_m2'] = 20.0
-            params['mass_kg'] = 2000.0
-        else:
-            # Modern satellites - includes many small CubeSats
-            if satellite_id % 100 < 20:  # Assume 20% are CubeSats
-                params['size_m2'] = 0.1   # 1U CubeSat
-                params['mass_kg'] = 1.0
-            else:
-                params['size_m2'] = 10.0
-                params['mass_kg'] = 1000.0
-
-        # Estimate altitude based on ID (very rough)
-        params['altitude_km'] = 400.0 + (satellite_id % 20) * 10.0  # 400-600 km range
-        params['inclination_deg'] = satellite_id % 180  # 0-180 degrees
-
-        return params
-
-    def generate_risk_report(
-        self,
-        conjunction_result,
-        risk_features: RiskFeatures
-    ) -> Dict[str, Any]:
+    def assess(self, conjunction: ConjunctionInput) -> RiskAssessment:
         """
-        Generate comprehensive risk report for a conjunction.
+        Produce the full risk assessment for one conjunction.
 
         Args:
-            conjunction_result: ConjunctionResult object
-            risk_features: RiskFeatures object from assessment
+            conjunction: State vectors, TLE ages, and object classes at TCA.
 
         Returns:
-            Dictionary containing complete risk report
+            A RiskAssessment carrying Pc, score, severity, factors, narrative.
         """
-        report = {
-            'conjunction': {
-                'satellite1_id': conjunction_result.satellite1_id,
-                'satellite2_id': conjunction_result.satellite2_id,
-                'tca': conjunction_result.tca.isoformat() if conjunction_result.tca else None,
-                'miss_distance_km': conjunction_result.miss_distance,
-                'geometry': self._calculate_conjunction_geometry(
-                    conjunction_result.position1 or np.zeros(3),
-                    conjunction_result.position2 or np.zeros(3),
-                    conjunction_result.velocity1 or np.zeros(3),
-                    conjunction_result.velocity2 or np.zeros(3)
-                ) if all(v is not None for v in [
-                    conjunction_result.position1, conjunction_result.position2,
-                    conjunction_result.velocity1, conjunction_result.velocity2
-                ]) else None
+        pc_result = self._pc_for(conjunction)
+        pc = pc_result.pc
+
+        risk_score = priority_score(pc, conjunction.time_to_tca_hours)
+
+        factors = self._explain(conjunction, pc)
+
+        sigma_p = self.model_for(conjunction.primary_uncertainty_regime).describe(
+            conjunction.primary_tle_age_days)
+        sigma_s = self.model_for(conjunction.secondary_uncertainty_regime).describe(
+            conjunction.secondary_tle_age_days)
+
+        assessment = RiskAssessment(
+            pc=pc,
+            risk_score=risk_score,
+            severity=severity_for_pc(pc),
+            miss_distance_km=pc_result.geometry.miss_distance_km,
+            relative_speed_kms=pc_result.geometry.relative_speed_kms,
+            time_to_tca_hours=conjunction.time_to_tca_hours,
+            combined_hbr_m=pc_result.combined_hbr_m,
+            pc_result=pc_result,
+            factors=factors,
+            uncertainty_summary={
+                "primary_tle_age_days": sigma_p["tle_age_days"],
+                "primary_sigma_along_track_km": sigma_p["sigma_along_track_km"],
+                "secondary_tle_age_days": sigma_s["tle_age_days"],
+                "secondary_sigma_along_track_km": sigma_s["sigma_along_track_km"],
+                "primary_model_source": sigma_p["model_source"],
+                "secondary_model_source": sigma_s["model_source"],
+                "extrapolated": bool(sigma_p["extrapolated"] or sigma_s["extrapolated"]),
             },
-            'risk_assessment': risk_features.to_dict(),
-            'explanation': None,
-            'recommendations': self._generate_recommendations(risk_features)
-        }
+            primary_id=conjunction.primary_id,
+            secondary_id=conjunction.secondary_id,
+        )
+        assessment.narrative = self._narrate(assessment)
 
-        # Add SHAP explanation if model is trained
-        if self.collision_model.is_trained:
-            report['explanation'] = self.collision_model.explain_prediction(risk_features)
+        self.logger.info(
+            "Conjunction %s-%s: Pc=%.3e (%s), score=%.1f",
+            conjunction.primary_id,
+            conjunction.secondary_id,
+            pc,
+            assessment.severity,
+            risk_score,
+        )
+        return assessment
 
-        return report
+    # -- explainability ----------------------------------------------------
 
-    def _generate_recommendations(self, features: RiskFeatures) -> List[str]:
+    def _explain(
+        self, conjunction: ConjunctionInput, actual_pc: float
+    ) -> List[FactorContribution]:
         """
-        Generate mitigation recommendations based on risk level.
+        Attribute the risk to its drivers by counterfactual re-evaluation.
+
+        Each factor is reset to a benign baseline and Pc is recomputed. The
+        resulting drop in log-probability measures how much that factor is
+        responsible for the risk being where it is.
+        """
+        if actual_pc <= 0.0:
+            return []
+
+        log_actual = math.log10(actual_pc)
+        raw: List[FactorContribution] = []
+
+        # --- proximity -----------------------------------------------------
+        r_rel = conjunction.relative_position_km()
+        miss = float(np.linalg.norm(r_rel))
+        if 0.0 < miss < self.benign_miss_distance_km:
+            scaled = r_rel * (self.benign_miss_distance_km / miss)
+            cf = self._pc_for(conjunction, relative_position_km=scaled).pc
+            raw.append(
+                self._make_factor(
+                    "miss_distance",
+                    "Miss distance",
+                    log_actual,
+                    cf,
+                    f"At the screening baseline of {self.benign_miss_distance_km:.0f} km "
+                    f"rather than the predicted {miss:.2f} km, the probability would be "
+                    f"{format_pc(cf)}.",
+                )
+            )
+
+        # --- ephemeris staleness -------------------------------------------
+        max_age = max(
+            conjunction.primary_tle_age_days, conjunction.secondary_tle_age_days
+        )
+        if max_age > 0.0:
+            cf = self._pc_for(
+                conjunction, primary_age_days=0.0, secondary_age_days=0.0
+            ).pc
+            raw.append(
+                self._make_factor(
+                    "tle_staleness",
+                    "Ephemeris uncertainty",
+                    log_actual,
+                    cf,
+                    f"With both elements fresh at epoch instead of up to "
+                    f"{max_age:.1f} days old, the probability would be {format_pc(cf)}.",
+                )
+            )
+
+        # --- object size ----------------------------------------------------
+        hbr_1 = hard_body_radius_for(conjunction.primary_object_class)
+        hbr_2 = hard_body_radius_for(conjunction.secondary_object_class)
+        combined = hbr_1 + hbr_2
+        if combined > self.benign_combined_hbr_m:
+            cf = self._pc_for(conjunction, combined_hbr_m=self.benign_combined_hbr_m).pc
+            raw.append(
+                self._make_factor(
+                    "object_size",
+                    "Object size",
+                    log_actual,
+                    cf,
+                    f"For a combined hard-body radius of "
+                    f"{self.benign_combined_hbr_m:.1f} m rather than {combined:.1f} m, "
+                    f"the probability would be {format_pc(cf)}.",
+                )
+            )
+
+        # Normalise the risk-raising factors into shares of the total elevation.
+        # Risk-reducing factors keep a signed percentage so the UI can show them
+        # as what they are rather than silently dropping them to zero.
+        elevating = [f for f in raw if f.log10_delta > 0.0]
+        total = sum(f.log10_delta for f in elevating)
+        if total > 0.0:
+            for factor in elevating:
+                factor.contribution_percent = 100.0 * factor.log10_delta / total
+            for factor in raw:
+                if factor.log10_delta <= 0.0:
+                    factor.contribution_percent = 100.0 * factor.log10_delta / total
+
+        raw.sort(key=lambda f: f.contribution_percent, reverse=True)
+        return raw
+
+    @staticmethod
+    def _make_factor(
+        name: str,
+        display_name: str,
+        log_actual: float,
+        counterfactual_pc: float,
+        explanation: str,
+    ) -> FactorContribution:
+        # Clamp to the reporting floor before taking the logarithm, so the
+        # attribution arithmetic and the displayed figure agree with each other.
+        clamped = max(counterfactual_pc, PC_REPORTING_FLOOR)
+        log_cf = math.log10(clamped)
+        delta = log_actual - log_cf
+        return FactorContribution(
+            name=name,
+            display_name=display_name,
+            contribution_percent=0.0,  # filled in during normalisation
+            counterfactual_pc=clamped,
+            log10_delta=delta,
+            direction="raises" if delta > 0.0 else "reduces",
+            explanation=explanation,
+        )
+
+    # -- narrative ---------------------------------------------------------
+
+    def _narrate(self, assessment: RiskAssessment) -> str:
+        """Compose the operator-facing summary sentence."""
+        parts = [
+            f"Collision probability is {format_pc(assessment.pc)} "
+            f"({assessment.severity}), from a predicted miss of "
+            f"{assessment.miss_distance_km:.2f} km at a relative velocity of "
+            f"{assessment.relative_speed_kms:.1f} km/s."
+        ]
+
+        raising = [f for f in assessment.factors if f.direction == "raises"]
+        if raising:
+            top = raising[0]
+            parts.append(
+                f"The dominant driver is {top.display_name.lower()} "
+                f"({top.contribution_percent:.0f}% of the elevation). {top.explanation}"
+            )
+
+        reducing = [f for f in assessment.factors if f.direction == "reduces"]
+        if reducing:
+            worst = min(reducing, key=lambda f: f.log10_delta)
+            parts.append(
+                f"Note that {worst.display_name.lower()} is currently lowering the "
+                f"probability through uncertainty dilution: {worst.explanation}"
+            )
+
+        hours = assessment.time_to_tca_hours
+        if hours <= _URGENCY_FULL_HOURS:
+            parts.append(
+                f"Closest approach is in {hours:.1f} h, leaving little time to act."
+            )
+        else:
+            parts.append(f"Closest approach is in {hours:.1f} h.")
+
+        parts.append(
+            "Probability is computed from orbital mechanics; time to closest "
+            "approach affects response time, not likelihood."
+        )
+        return " ".join(parts)
+
+    def retime(self, assessment: RiskAssessment, time_to_tca_hours: float) -> RiskAssessment:
+        """
+        Update an assessment for the passage of time, without recomputing Pc.
+
+        Time to closest approach does not enter the probability, so as a
+        conjunction draws nearer only the urgency-dependent score and the
+        narrative change. This avoids re-running the quadrature -- and the
+        counterfactual re-evaluations -- every time a dashboard refreshes.
+        """
+        assessment.time_to_tca_hours = time_to_tca_hours
+        assessment.risk_score = priority_score(assessment.pc, time_to_tca_hours)
+        assessment.narrative = self._narrate(assessment)
+        return assessment
+
+    # -- batch operations --------------------------------------------------
+
+    def assess_many(
+        self, conjunctions: Sequence[ConjunctionInput]
+    ) -> List[RiskAssessment]:
+        """
+        Assess a set of conjunctions and rank them by priority.
+
+        Ranking is by risk score, which already folds in urgency, so the head of
+        the list is the event an operator should look at first.
+        """
+        assessments = []
+        for conjunction in conjunctions:
+            try:
+                assessments.append(self.assess(conjunction))
+            except (ValueError, np.linalg.LinAlgError) as exc:
+                self.logger.error(
+                    "Skipping conjunction %s-%s: %s",
+                    conjunction.primary_id,
+                    conjunction.secondary_id,
+                    exc,
+                )
+        assessments.sort(key=lambda a: a.risk_score, reverse=True)
+        return assessments
+
+    def pc_reduction(
+        self,
+        before: ConjunctionInput,
+        after_relative_position_km: np.ndarray,
+    ) -> Dict[str, float]:
+        """
+        Compare Pc before and after a proposed maneuver.
+
+        This is what makes the fuel-versus-risk tradeoff quantitative: the
+        optimizer supplies the post-maneuver relative position and gets back the
+        probability actually retired by spending that delta-v.
 
         Args:
-            features: RiskFeatures object
+            before: The unmitigated conjunction.
+            after_relative_position_km: Predicted relative position at TCA once
+                the maneuver has been applied.
 
         Returns:
-            List of recommendation strings
+            Mapping with the before/after probabilities, the absolute reduction,
+            and the reduction factor.
         """
-        recommendations = []
-        risk_level = features.risk_level or 'unknown'
-        miss_distance = features.miss_distance or 999.0
-        collision_prob = features.collision_probability or 0.0
+        pc_before = self._pc_for(before).pc
+        pc_after = self._pc_for(
+            before, relative_position_km=after_relative_position_km
+        ).pc
 
-        if risk_level == 'low':
-            recommendations.append("Continue normal operations")
-            recommendations.append("Monitor conjunction for any changes")
-        elif risk_level == 'medium':
-            recommendations.append("Increase monitoring frequency")
-            recommendations.append("Prepare for possible collision avoidance maneuver")
-            recommendations.append("Verify satellite tracking data accuracy")
-        elif risk_level == 'high':
-            recommendations.append("Consider collision避让 maneuver")
-            recommendations.append("Notify satellite operators of both objects")
-            recommendations.append("Prepare conjunction data summary for decision makers")
-            if miss_distance < 1.0:
-                recommendations.append("URGENT: Miss distance < 1km - immediate action may be required")
-        elif risk_level == 'critical':
-            recommendations.append("IMMEDIATE ACTION REQUIRED")
-            recommendations.append("Execute collision避让 maneuver if possible")
-            recommendations.append("Issue emergency notifications to all affected parties")
-            recommendations.append("Consider safing procedures for vulnerable satellites")
-            recommendations.append("Prepare post-conjunction assessment plans")
-
-        # Add specific recommendations based on factors
-        if collision_prob > 0.5:
-            recommendations.append(f"High collision probability ({collision_prob:.1%}) warrants serious consideration of避让")
-
-        if features.relative_speed and features.relative_speed > 15.0:
-            recommendations.append("High relative velocity increases collision energy -避让 effectiveness may be reduced")
-
-        if features.time_to_tca and features.time_to_tca < 1.0:
-            recommendations.append("TCA imminent (< 1 hour) - limited time for避让 decision")
-
-        return recommendations
-
-
-def create_sample_risk_model() -> CollisionRiskModel:
-    """
-    Create and train a sample risk model for demonstration purposes.
-    In production, this would be replaced with a properly trained model.
-
-    Returns:
-        Trained CollisionRiskModel instance
-    """
-    model = CollisionRiskModel()
-
-    # Generate synthetic training data for demonstration
-    np.random.seed(42)
-    n_samples = 1000
-
-    # Features: [miss_distance, relative_speed, radial_velocity, tangential_speed,
-    #           approach_angle, time_to_tca, satellite_size, altitude, inclination, space_weather]
-    X = np.random.rand(n_samples, 10)
-
-    # Scale features to realistic ranges
-    X[:, 0] = X[:, 0] * 20.0          # miss_distance: 0-20 km
-    X[:, 1] = X[:, 1] * 20.0          # relative_speed: 0-20 km/s
-    X[:, 2] = (X[:, 2] - 0.5) * 10.0  # radial_velocity: -5 to 5 km/s
-    X[:, 3] = X[:, 3] * 10.0          # tangential_speed: 0-10 km/s
-    X[:, 4] = X[:, 4] * 180.0         # approach_angle: 0-180 degrees
-    X[:, 5] = X[:, 5] * 48.0          # time_to_tca: 0-48 hours
-    X[:, 6] = X[:, 6] * 100.0         # satellite_size_factor: 0-100
-    X[:, 7] = X[:, 7] * 1000.0        # altitude: 0-1000 km
-    X[:, 8] = X[:, 8] * 180.0         # inclination: 0-180 degrees
-    X[:, 9] = X[:, 9] * 3.0 + 0.5     # space_weather: 0.5-3.5
-
-    # Generate labels based on heuristic: close distance + high speed + approaching = higher risk
-    risk_score = (
-        np.maximum(0, (10.0 - X[:, 0]) / 10.0) * 0.4 +  # Close distance
-        np.minimum(1, X[:, 1] / 15.0) * 0.3 +             # High speed
-        np.maximum(0, X[:, 2]) / 10.0 * 0.2 +             # Approaching (negative radial vel)
-        np.minimum(1, (180.0 - X[:, 4]) / 90.0) * 0.1     # Head-on angle
-    )
-    y = (risk_score > 0.3).astype(int)  # Binary label
-
-    # Train model
-    model.train_model(X, y)
-
-    return model
-
-
-if __name__ == "__main__":
-    # Example usage
-    logging.basicConfig(level=logging.INFO)
-
-    # Create and test risk engine
-    risk_engine = RiskEngine()
-
-    # Train sample model if not already trained
-    if not risk_engine.collision_model.is_trained:
-        logger.info("Training sample risk model...")
-        risk_engine.collision_model = create_sample_risk_model()
-
-    logger.info("Risk engine ready for use")
+        # Clamp the post-maneuver figure to the reporting floor before dividing.
+        # Without this the ratio reads as "reduced by a factor of 2e14", which is
+        # an artefact of extrapolating a Gaussian tail, not a real result.
+        pc_after_reported = max(pc_after, PC_REPORTING_FLOOR)
+        return {
+            "pc_before": pc_before,
+            "pc_after": pc_after_reported,
+            "pc_after_below_floor": pc_after < PC_REPORTING_FLOOR,
+            "pc_reduction": pc_before - pc_after_reported,
+            "reduction_factor": pc_before / pc_after_reported,
+        }

@@ -38,13 +38,25 @@ pnpm-debug.log*
 # Miscellaneous
 *.tmp
 *.temp
-
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*.egg-info/
 .pytest_cache/
 .venv/
+.venv-*/
 venv/
 env/
+
+# Training downloads for the learned uncertainty model (large; re-fetched by
+# scripts/train_uncertainty_model.py). The fitted model in models/ is committed.
+data/training/
+
+# Secrets and machine-specific configuration. Copy the matching .env.example
+# instead. Real credentials were previously committed here -- never again.
+.env
+backend/.env
+frontend/.env
+
+# Build output
+frontend/dist/
