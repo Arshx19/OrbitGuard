@@ -188,6 +188,10 @@ export function mapRiskAnalysis(payload) {
     uncertainty: uncertaintyBand(sigma),
     sigmaAlongTrackKm: sigma,
     tleAgeDays: payload.uncertainty?.primary_tle_age_days,
+    // Provenance of the position uncertainty behind the probability: either the
+    // assumed default or a model learned from measured element-set errors.
+    uncertaintySource: payload.uncertainty?.primary_model_source,
+    uncertaintyExtrapolated: Boolean(payload.uncertainty?.extrapolated),
 
     combinedHbrM: payload.combined_hbr_m,
     factors,

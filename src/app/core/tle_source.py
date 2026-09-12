@@ -46,6 +46,8 @@ from app.core.data_ingestion import TLEData, TLEParser
 logger = logging.getLogger(__name__)
 
 CELESTRAK_GP_URL = "https://celestrak.org/NORAD/elements/gp.php"
+CELESTRAK_SUPPLEMENTAL_URL = "https://celestrak.org/NORAD/elements/supplemental/sup-gp.php"
+SUPPLEMENTAL_PREFIX = "sup-"
 
 # Identify ourselves. CelesTrak's usage guidelines ask clients to send a
 # meaningful User-Agent so they can contact operators of misbehaving scripts
@@ -353,11 +355,22 @@ class CelesTrakClient:
                 "Install it with: pip install -r requirements.txt"
             ) from exc
 
-        self.logger.info("Fetching group %r from CelesTrak.", group)
+        # "sup-<file>" selects CelesTrak's Supplemental GP data: element sets fitted
+        # to operator-provided ephemerides rather than to radar tracking, and so
+        # far more accurate. They serve as near-truth when measuring how badly
+        # the standard element sets drift.
+        if group.startswith(SUPPLEMENTAL_PREFIX):
+            url = CELESTRAK_SUPPLEMENTAL_URL
+            params = {"FILE": group[len(SUPPLEMENTAL_PREFIX):], "FORMAT": "tle"}
+        else:
+            url = CELESTRAK_GP_URL
+            params = {"GROUP": group, "FORMAT": "tle"}
+
+        self.logger.info("Fetching %r from CelesTrak.", group)
         try:
             response = requests.get(
-                CELESTRAK_GP_URL,
-                params={"GROUP": group, "FORMAT": "tle"},
+                url,
+                params=params,
                 timeout=self.timeout_seconds,
                 headers={"User-Agent": self.user_agent},
             )

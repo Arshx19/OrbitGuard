@@ -392,7 +392,10 @@ def collision_probability(
             combined_hbr_km,
         )
         diagnostics["chan_cross_check"] = approx
-        if pc > 1e-12 and approx > 1e-12:
+        # Only cross-check where both estimates are meaningful. Near 1e-12 the
+        # quadrature's absolute tolerance is comparable to the answer itself, so
+        # a percentage disagreement there is numerical noise, not a warning sign.
+        if pc > 1e-10 and approx > 1e-10:
             rel_diff = abs(pc - approx) / max(pc, approx)
             diagnostics["cross_check_relative_difference"] = rel_diff
             if rel_diff > 0.05:

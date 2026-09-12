@@ -98,6 +98,11 @@ class ConjunctionInput:
     primary_object_class: str = "typical_leo_satellite"
     secondary_object_class: str = "debris_fragment"
 
+    primary_uncertainty_regime: Optional[str] = None
+    secondary_uncertainty_regime: Optional[str] = None
+    """Which learned error-growth regime applies to each object, if the engine
+    has learned models. None falls back to the engine's default model."""
+
     primary_id: Optional[int] = None
     secondary_id: Optional[int] = None
     tca: Optional[datetime] = None
@@ -259,6 +264,10 @@ class RiskEngine:
         uncertainty_model: Model governing how TLE position error grows with
             propagation age. The default is a documented assumption; see
             `app.core.uncertainty` for why one is needed at all.
+        uncertainty_models: Learned models keyed by regime, as returned by
+            `app.core.uncertainty.learned_models()`. When given, each object's
+            covariance comes from the model for its regime; objects with no
+            regime, or a regime without a model, use `uncertainty_model`.
         benign_miss_distance_km: The miss distance a conjunction is compared
             against when explaining how much proximity contributes.
         benign_combined_hbr_m: The combined hard-body radius used as the "small
@@ -270,8 +279,10 @@ class RiskEngine:
         uncertainty_model: Optional[TLEUncertaintyModel] = None,
         benign_miss_distance_km: float = 10.0,
         benign_combined_hbr_m: float = 1.0,
+        uncertainty_models: Optional[Dict[str, TLEUncertaintyModel]] = None,
     ):
         self.uncertainty_model = uncertainty_model or TLEUncertaintyModel()
+        self.uncertainty_models = dict(uncertainty_models or {})
         self.benign_miss_distance_km = benign_miss_distance_km
         self.benign_combined_hbr_m = benign_combined_hbr_m
         self.logger = logging.getLogger(__name__)
@@ -317,13 +328,13 @@ class RiskEngine:
             conjunction.primary_position_km,
             conjunction.primary_velocity_kms,
             age_1,
-            self.uncertainty_model,
+            self.model_for(conjunction.primary_uncertainty_regime),
         )
         cov_2 = covariance_for_object(
             conjunction.secondary_position_km,
             conjunction.secondary_velocity_kms,
             age_2,
-            self.uncertainty_model,
+            self.model_for(conjunction.secondary_uncertainty_regime),
         )
 
         if combined_hbr_m is None:
@@ -342,6 +353,12 @@ class RiskEngine:
             hard_body_radius_2_m=hbr_2,
             method=method,
         )
+
+    def model_for(self, regime: Optional[str]) -> TLEUncertaintyModel:
+        """The uncertainty model for a regime, falling back to the default."""
+        if regime is not None and regime in self.uncertainty_models:
+            return self.uncertainty_models[regime]
+        return self.uncertainty_model
 
     def probability(self, conjunction: ConjunctionInput, method: str = "foster") -> PcResult:
         """
@@ -370,8 +387,10 @@ class RiskEngine:
 
         factors = self._explain(conjunction, pc)
 
-        sigma_p = self.uncertainty_model.describe(conjunction.primary_tle_age_days)
-        sigma_s = self.uncertainty_model.describe(conjunction.secondary_tle_age_days)
+        sigma_p = self.model_for(conjunction.primary_uncertainty_regime).describe(
+            conjunction.primary_tle_age_days)
+        sigma_s = self.model_for(conjunction.secondary_uncertainty_regime).describe(
+            conjunction.secondary_tle_age_days)
 
         assessment = RiskAssessment(
             pc=pc,
@@ -388,6 +407,9 @@ class RiskEngine:
                 "primary_sigma_along_track_km": sigma_p["sigma_along_track_km"],
                 "secondary_tle_age_days": sigma_s["tle_age_days"],
                 "secondary_sigma_along_track_km": sigma_s["sigma_along_track_km"],
+                "primary_model_source": sigma_p["model_source"],
+                "secondary_model_source": sigma_s["model_source"],
+                "extrapolated": bool(sigma_p["extrapolated"] or sigma_s["extrapolated"]),
             },
             primary_id=conjunction.primary_id,
             secondary_id=conjunction.secondary_id,

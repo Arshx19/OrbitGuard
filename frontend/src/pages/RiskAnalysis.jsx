@@ -39,6 +39,17 @@ export default function RiskAnalysis() {
         <RiskFactors factors={c.factors} />
       </div>
 
+      {c.uncertaintySource && (
+        <div className="-mt-2 text-[11px] text-ink-faint">
+          Position uncertainty: {c.uncertaintySource}
+          {c.uncertaintyExtrapolated && (
+            <span className="ml-1 text-risk-amber">
+              · element sets older than the training data, so error growth is extrapolated
+            </span>
+          )}
+        </div>
+      )}
+
       <div className="panel border-l-2 border-l-signal p-4 text-sm text-ink-muted">
         {c.narrative ? (
           c.narrative

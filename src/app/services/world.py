@@ -40,6 +40,7 @@ import numpy as np
 
 from app.core.risk_engine import ConjunctionInput, RiskAssessment, RiskEngine
 from app.core.tle_source import CelesTrakClient
+from app.core.uncertainty import REGIME_PASSIVE, learned_models, uncertainty_regime
 from app.services.maneuvers import ManeuverPlanner
 from app.services.screening import CloseApproach, screen
 from app.services.tracks import TLETrack, Track, TwoBodyTrack, seconds_between, to_jd
@@ -106,7 +107,10 @@ class World:
     """Catalog, screening results, and risk assessments, built once and served."""
 
     def __init__(self):
-        self.engine = RiskEngine()
+        # Learned error-growth models replace the assumed one when a trained
+        # model file is present; see scripts/train_uncertainty_model.py.
+        self.uncertainty_models = learned_models()
+        self.engine = RiskEngine(uncertainty_models=self.uncertainty_models)
         self.tracks: List[Track] = []
         self.events: Dict[str, Event] = {}
         self.built_at: Optional[datetime] = None
@@ -182,6 +186,7 @@ class World:
                     object_id=str(tle.satellite_number),
                     name=tle.object_name.strip(),
                     body_key=body_key,
+                    uncertainty_regime=uncertainty_regime(tle.object_name, traits["object_class"]),
                     satrec=tle.satrec,
                     norad_id=tle.satellite_number,
                     **traits,
@@ -207,6 +212,7 @@ class World:
         secondary = TwoBodyTrack(
             object_id="SIM-DEB-1", name="SIMULATED DEBRIS", object_type="Debris",
             object_class="debris_fragment", maneuverable=False, simulated=True,
+            uncertainty_regime=REGIME_PASSIVE,
             epoch_jd=jd, epoch_fr=fr,
             position_km=r + offset * SIMULATED_MISS_KM,
             velocity_kms=speed * (-0.55 * v_hat + 0.835 * offset),
@@ -234,6 +240,8 @@ class World:
             secondary_tle_age_days=approach.secondary.tle_age_days(jd, fr),
             primary_object_class=approach.primary.object_class,
             secondary_object_class=approach.secondary.object_class,
+            primary_uncertainty_regime=approach.primary.uncertainty_regime,
+            secondary_uncertainty_regime=approach.secondary.uncertainty_regime,
             tca=approach.tca,
         ))
 

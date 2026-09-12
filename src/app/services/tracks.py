@@ -133,6 +133,9 @@ class Track:
 
     simulated: bool = False
 
+    uncertainty_regime: Optional[str] = None
+    """Learned error-growth regime for this object's ephemeris (see app.core.uncertainty)."""
+
     def _propagate(self, jd: np.ndarray, fr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         raise NotImplementedError
 

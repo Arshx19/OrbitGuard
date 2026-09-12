@@ -72,6 +72,21 @@ def health():
         "conjunctions": len(world.events),
         "config": world.config,
         "catalog": world.catalog_snapshots,
+        "uncertainty_model": uncertainty_provenance(world),
+    }
+
+
+def uncertainty_provenance(world):
+    """Which position-uncertainty model is in use, and the evidence behind it."""
+    models = world.uncertainty_models
+    if not models:
+        return {"learned": False, "source": "assumed (no trained model file found)"}
+    return {
+        "learned": True,
+        "regimes": {
+            regime: {"source": model.source, "trained_age_range_days": model.trained_age_range_days}
+            for regime, model in models.items()
+        },
     }
 
 

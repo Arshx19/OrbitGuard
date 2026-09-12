@@ -140,6 +140,8 @@ def _conjunction_input(engine_primary: Track, secondary: Track, jd, fr, r1, v1, 
         secondary_tle_age_days=secondary.tle_age_days(jd, fr),
         primary_object_class=engine_primary.object_class,
         secondary_object_class=secondary.object_class,
+        primary_uncertainty_regime=engine_primary.uncertainty_regime,
+        secondary_uncertainty_regime=secondary.uncertainty_regime,
     )
 
 
@@ -184,6 +186,7 @@ class ManeuverPlanner:
             object_id=f"{base.object_id}-mnv",
             name=base.name, object_type=base.object_type, object_class=base.object_class,
             maneuverable=True, body_key=base.body_key, simulated=base.simulated,
+            uncertainty_regime=base.uncertainty_regime,
             base=base, burn_jd=event.tca_jd, burn_fr=event.tca_fr - lead_days,
             delta_v_rtn_kms=candidate.delta_v_rtn_kms,
         )

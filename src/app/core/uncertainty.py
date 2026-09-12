@@ -37,8 +37,10 @@ in place of the defaults.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
+import json
+import os
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -50,14 +52,14 @@ class TLEUncertaintyModel:
     """
     Parameterised RTN position-uncertainty growth for a TLE-derived ephemeris.
 
-    Standard deviations grow linearly with propagation age:
+    Standard deviations grow with propagation age as a low-order polynomial:
 
-        sigma(age) = sigma_at_epoch + growth_rate * age_days
+        sigma(age) = sigma_at_epoch + growth_rate * age + curvature * age^2
 
-    Linear growth is a deliberate simplification. Along-track error from a
-    semi-major-axis bias is closer to linear-in-time over the day or two that
-    matters for conjunction screening, and pretending to more sophistication
-    than the input data supports would be false precision.
+    The defaults are hand-assumed, order-of-magnitude values with no curvature.
+    `learned_models()` loads coefficients fitted to measured TLE errors instead;
+    see `app.core.uncertainty_learning` for how, and what the measurements
+    showed about the assumption.
     """
 
     sigma_radial_epoch_km: float = 0.10
@@ -67,6 +69,16 @@ class TLEUncertaintyModel:
     growth_radial_km_per_day: float = 0.20
     growth_along_track_km_per_day: float = 1.50
     growth_cross_track_km_per_day: float = 0.20
+
+    curvature_radial_km_per_day2: float = 0.0
+    curvature_along_track_km_per_day2: float = 0.0
+    curvature_cross_track_km_per_day2: float = 0.0
+
+    source: str = "assumed"
+    """Where the coefficients came from: "assumed", or a description of the fit."""
+
+    trained_age_range_days: Optional[Tuple[float, float]] = field(default=None, compare=False)
+    """For a learned model, the element-set ages the training data spanned."""
 
     def sigmas_rtn_km(self, age_days: float) -> Tuple[float, float, float]:
         """
@@ -82,9 +94,36 @@ class TLEUncertaintyModel:
         """
         age = abs(float(age_days))
         return (
-            self.sigma_radial_epoch_km + self.growth_radial_km_per_day * age,
-            self.sigma_along_track_epoch_km + self.growth_along_track_km_per_day * age,
-            self.sigma_cross_track_epoch_km + self.growth_cross_track_km_per_day * age,
+            self.sigma_radial_epoch_km + self.growth_radial_km_per_day * age
+            + self.curvature_radial_km_per_day2 * age * age,
+            self.sigma_along_track_epoch_km + self.growth_along_track_km_per_day * age
+            + self.curvature_along_track_km_per_day2 * age * age,
+            self.sigma_cross_track_epoch_km + self.growth_cross_track_km_per_day * age
+            + self.curvature_cross_track_km_per_day2 * age * age,
+        )
+
+    @classmethod
+    def from_coefficients(
+        cls,
+        epoch_km: Tuple[float, float, float],
+        growth_km_per_day: Tuple[float, float, float],
+        curvature_km_per_day2: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        source: str = "learned",
+        trained_age_range_days: Optional[Tuple[float, float]] = None,
+    ) -> "TLEUncertaintyModel":
+        """Build a model from per-axis (radial, along-track, cross-track) coefficients."""
+        return cls(
+            sigma_radial_epoch_km=float(epoch_km[0]),
+            sigma_along_track_epoch_km=float(epoch_km[1]),
+            sigma_cross_track_epoch_km=float(epoch_km[2]),
+            growth_radial_km_per_day=float(growth_km_per_day[0]),
+            growth_along_track_km_per_day=float(growth_km_per_day[1]),
+            growth_cross_track_km_per_day=float(growth_km_per_day[2]),
+            curvature_radial_km_per_day2=float(curvature_km_per_day2[0]),
+            curvature_along_track_km_per_day2=float(curvature_km_per_day2[1]),
+            curvature_cross_track_km_per_day2=float(curvature_km_per_day2[2]),
+            source=source,
+            trained_age_range_days=trained_age_range_days,
         )
 
     def covariance_rtn_km2(self, age_days: float) -> np.ndarray:
@@ -95,11 +134,21 @@ class TLEUncertaintyModel:
     def describe(self, age_days: float) -> Dict[str, float]:
         """Human-readable summary for display alongside a Pc figure."""
         sigma_r, sigma_t, sigma_n = self.sigmas_rtn_km(age_days)
+        age = abs(float(age_days))
+        # Only ages beyond the training data count as extrapolation: that is where
+        # a fitted growth rate is projected into the unmeasured. Ages slightly
+        # below the youngest sample just read the epoch term, which is close to
+        # what was measured.
+        extrapolated = (
+            self.trained_age_range_days is not None and age > self.trained_age_range_days[1]
+        )
         return {
-            "tle_age_days": abs(float(age_days)),
+            "tle_age_days": age,
             "sigma_radial_km": sigma_r,
             "sigma_along_track_km": sigma_t,
             "sigma_cross_track_km": sigma_n,
+            "model_source": self.source,
+            "extrapolated": extrapolated,
         }
 
 
@@ -263,3 +312,71 @@ def hard_body_radius_for(object_class: str) -> float:
     if key not in HARD_BODY_RADIUS_M:
         logger.debug("Unknown object class %r; using default hard-body radius.", key)
     return HARD_BODY_RADIUS_M.get(key, HARD_BODY_RADIUS_M["unknown"])
+
+
+# ---------------------------------------------------------------------------
+# Learned models
+# ---------------------------------------------------------------------------
+
+REGIME_PASSIVE = "passive"
+"""Objects that do not maneuver between element-set updates: debris, rocket
+bodies, and quiet satellites. Trained on OneWeb and Planet."""
+
+REGIME_MANEUVERING = "maneuvering"
+"""Satellites that maneuver every few days, whose element sets go stale fast.
+Trained on Starlink."""
+
+LEARNED_MODEL_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "models", "tle_uncertainty.json"
+)
+
+# Constellations measured to maneuver often enough that their element sets
+# degrade far faster than a passive object's. Kept as an explicit list because
+# it is a measured finding, not a guess about which satellites have thrusters.
+_FREQUENT_MANEUVER_TOKENS = ("STARLINK",)
+
+
+def uncertainty_regime(object_name: str = "", object_class: str = "") -> str:
+    """
+    Choose which learned error-growth regime applies to an object.
+
+    The deciding factor is how often an object maneuvers between element-set
+    updates, not whether it can: a maneuver the element set has not caught up
+    with is what makes along-track error explode. The measured Starlink data
+    grows about ten times faster than the passive constellations. Everything
+    not known to maneuver frequently -- including debris, rocket bodies, and
+    stations that reboost only occasionally -- uses the passive regime.
+    """
+    upper = (object_name or "").upper()
+    if any(token in upper for token in _FREQUENT_MANEUVER_TOKENS):
+        return REGIME_MANEUVERING
+    return REGIME_PASSIVE
+
+
+def learned_models(path: Optional[str] = None) -> Optional[Dict[str, TLEUncertaintyModel]]:
+    """
+    Load the fitted uncertainty models, one per regime.
+
+    Returns None if no trained model file exists, so callers can fall back to
+    the assumed defaults and say so.
+    """
+    path = os.path.abspath(path or LEARNED_MODEL_PATH)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            document = json.load(handle)
+        models = {}
+        for regime, spec in document["regimes"].items():
+            coefficients = spec["coefficients"]
+            models[regime] = TLEUncertaintyModel.from_coefficients(
+                epoch_km=tuple(coefficients["epoch_km"]),
+                growth_km_per_day=tuple(coefficients["growth_km_per_day"]),
+                curvature_km_per_day2=tuple(coefficients["curvature_km_per_day2"]),
+                source=spec["source"],
+                trained_age_range_days=tuple(spec["trained_age_range_days"]),
+            )
+        return models
+    except (OSError, KeyError, ValueError, TypeError) as exc:
+        logger.error("Could not load learned uncertainty models from %s: %s", path, exc)
+        return None

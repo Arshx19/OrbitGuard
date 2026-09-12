@@ -45,3 +45,7 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+
+# Training downloads for the learned uncertainty model (large; re-fetched by
+# scripts/train_uncertainty_model.py). The fitted model in models/ is committed.
+data/training/
