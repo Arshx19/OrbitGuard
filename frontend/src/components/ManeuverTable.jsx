@@ -30,14 +30,23 @@ export default function ManeuverTable({ candidates, selectedId, onSelect }) {
             return (
               <tr
                 key={c.id}
+                title={c.reason}
                 onClick={() => onSelect?.(c.id)}
                 className={`cursor-pointer border-t border-line transition hover:bg-void-600 ${
                   isSelected ? 'bg-void-600' : ''
                 }`}
               >
-                <td className="px-4 py-2.5 font-mono text-ink">#{String(c.id).padStart(2, '0')}</td>
+                <td className="px-4 py-2.5 font-mono text-ink">
+                  #{String(c.id).padStart(2, '0')}
+                  {c.recommended && <span className="ml-1.5 text-risk-green" title="Recommended">★</span>}
+                </td>
                 <td className="px-4 py-2.5 font-mono text-ink-muted">{c.deltaV.toFixed(2)} m/s</td>
-                <td className="px-4 py-2.5 text-ink-muted">{c.direction}</td>
+                <td className="px-4 py-2.5 text-ink-muted">
+                  {c.direction}
+                  {c.leadHours != null && (
+                    <span className="ml-1 font-mono text-[10px] text-ink-faint">T−{c.leadHours.toFixed(1)} h</span>
+                  )}
+                </td>
                 <td className="px-4 py-2.5 font-mono text-ink-muted">{c.newSeparationKm.toFixed(2)} km</td>
                 <td className="px-4 py-2.5 text-ink-faint">{c.newRisk}</td>
                 <td className="px-4 py-2.5">

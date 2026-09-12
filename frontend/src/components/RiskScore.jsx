@@ -1,8 +1,9 @@
 import { riskLevelMeta, levelFromScore } from '../data/mockData'
 
-export default function RiskScore({ score }) {
-  const level = levelFromScore(score)
-  const meta = riskLevelMeta[level]
+// `level` should come from the backend, which keys severity to collision
+// probability. Bucketing the score is only a fallback for mock data.
+export default function RiskScore({ score, level, probability }) {
+  const meta = riskLevelMeta[level ?? levelFromScore(score)]
   const circumference = 2 * Math.PI * 54
 
   return (
@@ -33,6 +34,11 @@ export default function RiskScore({ score }) {
       >
         {meta.label.toUpperCase()}
       </span>
+      {probability != null && (
+        <span className="font-mono text-[11px] text-ink-faint">
+          Pc {probability < 1e-12 ? '< 1e-12' : probability.toExponential(2)}
+        </span>
+      )}
     </div>
   )
 }

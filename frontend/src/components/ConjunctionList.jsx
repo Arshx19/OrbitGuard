@@ -1,9 +1,10 @@
 import { Link } from 'react-router-dom'
-import { riskLevelMeta, levelFromScore } from '../data/mockData'
+import { riskLevelMeta } from '../data/mockData'
+import { formatProbability, levelOf } from '../api/orbitguard'
+import SimulationBadge from './SimulationBadge'
 
-function RiskBadge({ score }) {
-  const level = levelFromScore(score)
-  const meta = riskLevelMeta[level]
+function RiskBadge({ conjunction }) {
+  const meta = riskLevelMeta[levelOf(conjunction)]
   return (
     <span
       className="rounded px-2 py-0.5 text-[10px] font-semibold tracking-wide"
@@ -50,9 +51,12 @@ export default function ConjunctionList({ conjunctions, selectedId, onSelect }) 
               </td>
               <td className="px-4 py-2.5 font-mono text-ink-muted">{c.minDistanceM} m</td>
               <td className="px-4 py-2.5 font-mono text-ink-muted">{c.relVelocityKms} km/s</td>
-              <td className="px-4 py-2.5 font-mono text-ink-muted">{c.probability.toExponential(1)}</td>
+              <td className="px-4 py-2.5 font-mono text-ink-muted">{formatProbability(c.probability)}</td>
               <td className="px-4 py-2.5">
-                <RiskBadge score={c.riskScore} />
+                <div className="flex items-center gap-1.5">
+                  <RiskBadge conjunction={c} />
+                  <SimulationBadge show={c.simulated} />
+                </div>
               </td>
               <td className="px-4 py-2.5">
                 <Link to={`/conjunction/${c.id}`} className="text-[11px] text-signal hover:underline">

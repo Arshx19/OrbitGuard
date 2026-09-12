@@ -1,15 +1,31 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { conjunctions, stats, riskLevelMeta, levelFromScore } from '../data/mockData'
+import { riskLevelMeta } from '../data/mockData'
+import { formatProbability, getStats, listConjunctions, levelOf, isLive } from '../api/orbitguard'
+import { useApi, Loading } from '../api/useApi'
 import StatCard from '../components/StatCard'
 import OrbitViewer from '../components/OrbitViewer'
 import ConjunctionList from '../components/ConjunctionList'
 import RiskTimeline from '../components/RiskTimeline'
+import SimulationBadge from '../components/SimulationBadge'
 
 export default function Dashboard() {
-  const [selectedId, setSelectedId] = useState(conjunctions[0].id)
-  const selected = conjunctions.find((c) => c.id === selectedId)
-  const level = levelFromScore(selected.riskScore)
+  const statsQuery = useApi(getStats, [])
+  const listQuery = useApi(listConjunctions, [])
+  const [selectedId, setSelectedId] = useState(null)
+
+  if (statsQuery.loading || listQuery.loading) {
+    return <Loading label="Screening the catalog…" />
+  }
+
+  const stats = statsQuery.data
+  const conjunctions = listQuery.data ?? []
+  if (!conjunctions.length) {
+    return <div className="p-5 text-xs text-ink-faint">No upcoming conjunctions in the screening window.</div>
+  }
+
+  const selected = conjunctions.find((c) => c.id === selectedId) ?? conjunctions[0]
+  const level = levelOf(selected)
   const meta = riskLevelMeta[level]
 
   return (
@@ -34,6 +50,7 @@ export default function Dashboard() {
             >
               {meta.label.toUpperCase()} CONJUNCTION
             </span>
+            <SimulationBadge show={selected.simulated} />
             <span className="font-mono text-[11px] text-ink-faint">{selected.id}</span>
           </div>
           <div className="text-sm font-medium text-ink">
@@ -51,7 +68,7 @@ export default function Dashboard() {
             </div>
             <div className="flex justify-between">
               <dt className="text-ink-faint">Collision probability</dt>
-              <dd className="font-mono" style={{ color: meta.color }}>{selected.probability.toExponential(1)}</dd>
+              <dd className="font-mono" style={{ color: meta.color }}>{formatProbability(selected.probability)}</dd>
             </div>
             <div className="flex justify-between">
               <dt className="text-ink-faint">Relative velocity</dt>
@@ -76,7 +93,15 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <ConjunctionList conjunctions={conjunctions} selectedId={selectedId} onSelect={setSelectedId} />
+      <ConjunctionList conjunctions={conjunctions} selectedId={selected.id} onSelect={setSelectedId} />
+
+      <div className="text-right font-mono text-[10px] text-ink-faint">
+        {conjunctions.live
+          ? 'LIVE · screened from public TLE data'
+          : isLive()
+            ? 'MOCK DATA · backend configured but unreachable'
+            : 'MOCK DATA · backend not connected'}
+      </div>
 
       <RiskTimeline timeline={selected.timeline} />
     </div>

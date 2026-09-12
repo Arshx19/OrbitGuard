@@ -1,14 +1,18 @@
-import { Link, useParams } from 'react-router-dom'
-import { conjunctions, riskLevelMeta, levelFromScore } from '../data/mockData'
+import { Link, Navigate, useParams } from 'react-router-dom'
+import { riskLevelMeta } from '../data/mockData'
+import { formatProbability, getConjunctionById, levelOf } from '../api/orbitguard'
+import { useApi, Loading } from '../api/useApi'
 import OrbitViewer from '../components/OrbitViewer'
+import SimulationBadge from '../components/SimulationBadge'
 
 export default function Conjunction() {
   const { id } = useParams()
+  const { data: selected, loading } = useApi(() => getConjunctionById(id), [id])
 
-  const selected =
-    conjunctions.find((c) => String(c.id) === String(id)) || conjunctions[0]
+  if (loading) return <Loading />
+  if (!selected) return <Navigate to="/" replace />
 
-  const level = levelFromScore(selected.riskScore)
+  const level = levelOf(selected)
   const meta = riskLevelMeta[level]
 
   return (
@@ -33,6 +37,7 @@ export default function Conjunction() {
         >
           {meta.label.toUpperCase()}
         </span>
+        <SimulationBadge show={selected.simulated} className="ml-2" />
       </div>
 
       {/* Orbit + Details */}
@@ -80,7 +85,7 @@ export default function Conjunction() {
                 className="font-mono"
                 style={{ color: meta.color }}
               >
-                {selected.probability.toExponential(1)}
+                {formatProbability(selected.probability)}
               </dd>
             </div>
 
