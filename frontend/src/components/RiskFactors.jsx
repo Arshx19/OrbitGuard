@@ -1,9 +1,9 @@
-export default function RiskFactors({ factors }) {
+export default function RiskFactors({ factors = [] }) {
   return (
     <div className="panel p-5">
       <div className="mb-4 text-xs font-medium tracking-wide text-ink-muted">WHY IS THIS EVENT DANGEROUS?</div>
       <div className="space-y-3">
-        {factors.map((f) => (
+        {(factors || []).map((f) => (
           <div key={f.label}>
             <div className="mb-1 flex items-center justify-between text-xs">
               <span className="text-ink-muted">{f.label}</span>

@@ -13,9 +13,9 @@ const railItems = [
 
 const navItems = [
   { to: '/', label: 'LIVE MONITOR' },
-  { to: '/conjunction/CJ-142', label: 'CONJUNCTIONS' },
-  { to: '/maneuver/CJ-142', label: 'MANEUVERS' },
-  { to: '/risk/CJ-142', label: 'ANALYTICS' },
+  { to: '/conjunction/CONJ-001', label: 'CONJUNCTIONS' },
+  { to: '/maneuver/CONJ-001', label: 'MANEUVERS' },
+  { to: '/risk/CONJ-001', label: 'ANALYTICS' },
   { to: '/', label: 'DATA' },
 ]
 

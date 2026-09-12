@@ -289,14 +289,10 @@ class TLEParser:
 
             # Create SGP4 satellite record
             try:
-                # Note: SGP4 expects mean motion in radians/minute, but TLE provides orbits/day
-                # The Satrec constructor handles the conversion
                 satrec = Satrec.twoline2rv(line1.strip(), line2.strip())
                 tle_data.satrec = satrec
-                logger.debug(f"Created SGP4 record for satellite {satellite_number}")
             except Exception as e:
                 logger.error(f"Failed to create SGP4 record for satellite {satellite_number}: {e}")
-                # Still return TLEData without satrec for debugging
 
             return tle_data
 
@@ -305,6 +301,9 @@ class TLEParser:
             logger.debug(f"Line 1: {line1}")
             logger.debug(f"Line 2: {line2}")
             return None
+
+
+_GLOBAL_TLE_CACHE: dict = {}
 
 
 class TLEDataIngestion:
@@ -342,34 +341,26 @@ class TLEDataIngestion:
             with open(filepath, 'r') as f:
                 lines = f.readlines()
 
-            # Process lines in pairs (TLE is always 2 lines per satellite)
+            clean_lines = [l.strip() for l in lines if l.strip() and not l.strip().startswith('#')]
+            current_name = ""
             i = 0
-            while i < len(lines):
-                line1 = lines[i].strip()
-                # Skip empty lines or comments
-                if not line1 or line1.startswith('#'):
-                    i += 1
-                    continue
-
-                # Look for line 2
-                if i + 1 < len(lines):
-                    line2 = lines[i + 1].strip()
-                    if line2 and not line2.startswith('#'):
-                        # Validate that we have a proper TLE pair
-                        if line1.startswith('1 ') and line2.startswith('2 '):
-                            tle_data = TLEParser.parse_tle_lines(line1, line2)
-                            if tle_data:
-                                tle_objects.append(tle_data)
-                                self.logger.debug(f"Loaded TLE for satellite {tle_data.satellite_number}")
-                            else:
-                                self.logger.warning(f"Failed to parse TLE pair in {filename} at lines {i+1}-{i+2}")
-                        else:
-                            self.logger.warning(f"Invalid TLE format in {filename} at lines {i+1}-{i+2}")
-                    i += 2  # Move past both lines
+            max_sats = 20
+            while i < len(clean_lines) and len(tle_objects) < max_sats:
+                line = clean_lines[i]
+                if line.startswith('1 ') and i + 1 < len(clean_lines):
+                    line2 = clean_lines[i + 1]
+                    if line2.startswith('2 '):
+                        tle_data = TLEParser.parse_tle_lines(line, line2)
+                        if tle_data:
+                            if current_name:
+                                tle_data.designation = current_name
+                            tle_objects.append(tle_data)
+                            current_name = ""
+                        i += 2
+                        continue
                 else:
-                    # Odd number of lines - incomplete TLE
-                    self.logger.warning(f"Incomplete TLE at end of {filename}")
-                    break
+                    current_name = line
+                i += 1
 
             self.logger.info(f"Loaded {len(tle_objects)} TLE objects from {filename}")
 
@@ -385,13 +376,17 @@ class TLEDataIngestion:
         Returns:
             List of all TLEData objects from all files
         """
+        global _GLOBAL_TLE_CACHE
+        if _GLOBAL_TLE_CACHE:
+            return list(_GLOBAL_TLE_CACHE.values())
+        if self._tle_cache:
+            return list(self._tle_cache.values())
+
         all_tle_objects = []
 
         if not os.path.exists(self.data_dir):
             self.logger.warning(f"TLE data directory not found: {self.data_dir}")
-            # Create directory if it doesn't exist
             os.makedirs(self.data_dir, exist_ok=True)
-            self.logger.info(f"Created TLE data directory: {self.data_dir}")
             return all_tle_objects
 
         try:
@@ -399,13 +394,14 @@ class TLEDataIngestion:
                     if f.endswith(('.tle', '.txt')) or f in ['tle', 'latest.tle']]
 
             if not files:
-                self.logger.info(f"No TLE files found in {self.data_dir}")
                 return all_tle_objects
 
             for filename in files:
                 tle_objects = self.load_tle_file(filename)
                 all_tle_objects.extend(tle_objects)
 
+            _GLOBAL_TLE_CACHE = {tle.satellite_number: tle for tle in all_tle_objects}
+            self._tle_cache = _GLOBAL_TLE_CACHE
             self.logger.info(f"Total TLE objects loaded: {len(all_tle_objects)}")
 
         except Exception as e:

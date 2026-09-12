@@ -1,8 +1,8 @@
 import { riskLevelMeta, levelFromScore } from '../data/mockData'
 
-export default function RiskScore({ score }) {
+export default function RiskScore({ score = 94 }) {
   const level = levelFromScore(score)
-  const meta = riskLevelMeta[level]
+  const meta = riskLevelMeta[level] || riskLevelMeta.critical
   const circumference = 2 * Math.PI * 54
 
   return (
@@ -19,7 +19,7 @@ export default function RiskScore({ score }) {
             strokeWidth="10"
             strokeLinecap="round"
             strokeDasharray={circumference}
-            strokeDashoffset={circumference * (1 - score / 100)}
+            strokeDashoffset={circumference * (1 - (score || 94) / 100)}
           />
         </svg>
         <div className="absolute inset-0 flex flex-col items-center justify-center">

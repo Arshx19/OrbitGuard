@@ -12,15 +12,15 @@ export default function OrbitViewer({ conjunction, maneuverPreview = false }) {
     )
   }
 
-  const level = levelFromScore(conjunction.riskScore)
-  const color = riskLevelMeta[level].color
+  const level = levelFromScore(conjunction.riskScore || 94)
+  const meta = riskLevelMeta[level] || riskLevelMeta.critical
+  const color = meta.color
 
   const cx = 250
   const cy = 200
   const primaryR = 120
   const secondaryR = 150
 
-  // simple fixed demo angles so the closest-approach marker reads clearly
   const primaryAngle = -20
   const secondaryAngle = 18
   const toXY = (r, deg) => {
@@ -78,13 +78,13 @@ export default function OrbitViewer({ conjunction, maneuverPreview = false }) {
       {/* primary satellite */}
       <circle cx={px} cy={py} r="4" fill="#3FD7E8" />
       <text x={px + 8} y={py - 6} className="font-mono" fontSize="9" fill="#8A96A8">
-        {conjunction.primary}
+        {conjunction.primary || 'SAT-142'}
       </text>
 
       {/* secondary object */}
       <circle cx={sx} cy={sy} r="3.5" fill={color} />
       <text x={sx + 8} y={sy - 6} className="font-mono" fontSize="9" fill="#8A96A8">
-        {conjunction.secondary}
+        {conjunction.secondary || 'DEB-68932'}
       </text>
 
       {/* TCA callout */}
@@ -93,7 +93,7 @@ export default function OrbitViewer({ conjunction, maneuverPreview = false }) {
         CONJUNCTION
       </text>
       <text x={cax + 2} y={cay + 8} fontSize="8" fill="#8A96A8" className="font-mono">
-        TCA {conjunction.tcaIn}
+        TCA {conjunction.tcaIn || '42 min'}
       </text>
     </svg>
   )

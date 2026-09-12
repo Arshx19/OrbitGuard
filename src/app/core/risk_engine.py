@@ -226,13 +226,24 @@ class CollisionRiskModel:
             shap_values = explainer.shap_values(X_scaled)
 
             # Get expected value and shap values for class 1 (risk)
-            expected_value = explainer.expected_value[1] if isinstance(explainer.expected_value, list) else explainer.expected_value
-            shap_vals = shap_values[1] if isinstance(shap_values, list) else shap_values
+            if isinstance(explainer.expected_value, (list, np.ndarray)):
+                expected_value = explainer.expected_value[1]
+            else:
+                expected_value = explainer.expected_value
+
+            if isinstance(shap_values, list):
+                shap_vals = shap_values[1][0]
+            elif isinstance(shap_values, np.ndarray) and shap_values.ndim == 3:
+                shap_vals = shap_values[0, :, 1]
+            elif isinstance(shap_values, np.ndarray) and shap_values.ndim == 2:
+                shap_vals = shap_values[0]
+            else:
+                shap_vals = shap_values
 
             # Create explanation dictionary
             explanation = {
                 'expected_value': float(expected_value),
-                'shap_values': dict(zip(self.feature_names, shap_vals[0].tolist())),
+                'shap_values': dict(zip(self.feature_names, shap_vals.tolist())),
                 'feature_values': dict(zip(self.feature_names, X[0].tolist())),
                 'prediction_probability': float(self.model.predict_proba(X_scaled)[0][1])
             }
@@ -274,7 +285,7 @@ class CollisionRiskModel:
         Args:
             filepath: Path to load model from
         """
-        try
+        try:
             with open(filepath, 'rb') as f:
                 model_data = pickle.load(f)
 

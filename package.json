@@ -1,0 +1,10 @@
+{
+  "name": "orbitguard-ai-workspace",
+  "version": "1.0.0",
+  "description": "ORBITGUARD AI - Debris Collision Avoidance & Explainable Risk System",
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "dev:backend": "npm --prefix backend start"
+  }
+}

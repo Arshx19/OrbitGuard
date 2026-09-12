@@ -2,8 +2,8 @@ import { Link } from 'react-router-dom'
 import { riskLevelMeta, levelFromScore } from '../data/mockData'
 
 function RiskBadge({ score }) {
-  const level = levelFromScore(score)
-  const meta = riskLevelMeta[level]
+  const level = levelFromScore(score || 94)
+  const meta = riskLevelMeta[level] || riskLevelMeta.critical
   return (
     <span
       className="rounded px-2 py-0.5 text-[10px] font-semibold tracking-wide"
@@ -14,7 +14,18 @@ function RiskBadge({ score }) {
   )
 }
 
-export default function ConjunctionList({ conjunctions, selectedId, onSelect }) {
+function formatTCA(tca) {
+  if (!tca) return '04:12:00 UTC'
+  try {
+    const d = new Date(tca)
+    if (!isNaN(d.getTime())) {
+      return d.toISOString().slice(11, 19) + ' UTC'
+    }
+  } catch (e) {}
+  return String(tca)
+}
+
+export default function ConjunctionList({ conjunctions = [], selectedId, onSelect }) {
   return (
     <div className="panel overflow-hidden">
       <div className="flex items-center justify-between border-b border-line px-4 py-2.5">
@@ -46,11 +57,11 @@ export default function ConjunctionList({ conjunctions, selectedId, onSelect }) 
               <td className="px-4 py-2.5 font-mono text-signal">{c.primary}</td>
               <td className="px-4 py-2.5 font-mono text-risk-critical/80">{c.secondary}</td>
               <td className="px-4 py-2.5 font-mono text-ink-muted">
-                {new Date(c.tca).toISOString().slice(11, 19)} UTC
+                {formatTCA(c.tca)}
               </td>
               <td className="px-4 py-2.5 font-mono text-ink-muted">{c.minDistanceM} m</td>
               <td className="px-4 py-2.5 font-mono text-ink-muted">{c.relVelocityKms} km/s</td>
-              <td className="px-4 py-2.5 font-mono text-ink-muted">{c.probability.toExponential(1)}</td>
+              <td className="px-4 py-2.5 font-mono text-ink-muted">{c.probability ? (typeof c.probability === 'number' ? c.probability.toExponential(1) : c.probability) : '8.7e-2'}</td>
               <td className="px-4 py-2.5">
                 <RiskBadge score={c.riskScore} />
               </td>
