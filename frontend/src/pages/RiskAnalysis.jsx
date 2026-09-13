@@ -6,6 +6,7 @@ import SimulationBadge from '../components/SimulationBadge'
 import RiskScore from '../components/RiskScore'
 import RiskFactors from '../components/RiskFactors'
 import RiskTimeline from '../components/RiskTimeline'
+import ExplainMyDecision from '../components/ExplainMyDecision'
 
 export default function RiskAnalysis() {
   const { id } = useParams()
@@ -79,7 +80,10 @@ export default function RiskAnalysis() {
 
       <RiskTimeline timeline={c.timeline} />
 
-      <div className="flex justify-end">
+      {/* AI Risk Copilot Decision Intelligence */}
+      <ExplainMyDecision conjunctionId={c.id} className="mt-6" />
+
+      <div className="flex justify-end pt-2">
         <Link
           to={`/maneuver/${c.id}`}
           className="rounded-md border border-signal/40 bg-signal/10 px-4 py-2 text-xs font-medium text-signal transition hover:bg-signal/20"

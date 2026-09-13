@@ -17,6 +17,8 @@ class SatelliteSchema(BaseModel):
     object_type: Optional[str] = Field(None, description="Active Satellite / Debris / Rocket Body.")
     maneuverable: Optional[bool] = Field(None)
     tle_age_days: Optional[float] = Field(None)
+    latitude: Optional[float] = Field(None)
+    longitude: Optional[float] = Field(None)
 
 
 class SatelliteListResponse(BaseModel):

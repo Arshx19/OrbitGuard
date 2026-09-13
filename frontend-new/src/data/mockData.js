@@ -3,14 +3,14 @@
 // Swap `api/orbitguard.js` for real fetch calls later without touching components.
 
 export const stats = {
-  objectsTracked: 12482,
-  objectsTrackedDelta: '+2.6%',
-  activeConjunctions: 37,
-  activeConjunctionsDelta: '+6.1%',
-  highRiskEvents: 5,
-  highRiskEventsDelta: '+25%',
-  satellitesMonitored: 1284,
-  satellitesMonitoredDelta: '+0.3%',
+  objectsTracked: 133,
+  objectsTrackedDelta: '',
+  activeConjunctions: 101,
+  activeConjunctionsDelta: '',
+  highRiskEvents: 2,
+  highRiskEventsDelta: '',
+  satellitesMonitored: 587,
+  satellitesMonitoredDelta: '',
 }
 
 export const riskLevelMeta = {

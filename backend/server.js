@@ -11,6 +11,7 @@ const satellitesRouter = require('./routes/satellites');
 const conjunctionsRouter = require('./routes/conjunctions');
 const riskRouter = require('./routes/risk');
 const maneuverRouter = require('./routes/maneuver');
+const explainRouter = require('./routes/explain');
 const { forward, PYTHON_AI_SERVICE_URL } = require('./lib/forward');
 
 const app = express();
@@ -38,6 +39,7 @@ app.use('/api/v1', satellitesRouter);
 app.use('/api/v1', conjunctionsRouter);
 app.use('/api/v1', riskRouter);
 app.use('/api/v1', maneuverRouter);
+app.use('/api/v1', explainRouter);
 
 // Start Node.js Express server
 app.listen(PORT, () => {

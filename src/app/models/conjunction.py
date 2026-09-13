@@ -13,6 +13,7 @@ class TimelinePoint(BaseModel):
     t: str = Field(..., description="Label relative to closest approach, e.g. 'T-48'.")
     hours: float = Field(..., description="Hours relative to closest approach.")
     distance_km: float = Field(..., description="Propagated separation at that time.")
+    after_km: Optional[float] = Field(None, description="Post-maneuver separation at that time.")
 
 
 class ConjunctionSummary(BaseModel):
@@ -129,6 +130,7 @@ class ManeuverCandidateSchema(BaseModel):
     rescreened: Optional[bool] = Field(None)
     recommended: bool = Field(False)
     secondary_threat_details: Optional[List[Dict[str, Any]]] = Field(None)
+    post_burn_timeline: Optional[List[TimelinePoint]] = Field(None)
 
 
 class ValidationChecks(BaseModel):

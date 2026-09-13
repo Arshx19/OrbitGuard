@@ -276,4 +276,58 @@ export async function validateManeuver(id, candidateId) {
   }
 }
 
+export async function triggerRefresh() {
+  try {
+    const data = await request('/screening/refresh', { method: 'POST' })
+    return tagged(data, 'live')
+  } catch (e) {
+    console.warn('Error triggering data refresh:', e)
+    return null
+  }
+}
+
+export async function getDecisionExplanation(id, candidateId = null) {
+  try {
+    const data = await request('/explain/decision', {
+      method: 'POST',
+      body: JSON.stringify({ conjunction_id: id, candidate_id: candidateId }),
+    })
+    return tagged(data, 'live')
+  } catch (e) {
+    console.warn('Using fallback data for getDecisionExplanation:', e)
+    const c = getConjunction(id) || conjunctions[0]
+    return tagged({
+      conjunction_id: id,
+      primary_name: c?.primary || 'ISS (ZARYA)',
+      secondary_name: c?.secondary || 'COSMOS 2251 DEBRIS',
+      tca: c?.tca || '2026-09-14 18:42:00 UTC',
+      risk_level: c?.level || 'critical',
+      risk_score: c?.riskScore || 94,
+      pc_before: c?.probability || 2.31e-4,
+      summary: `Conjunction ${id} evaluated. Initial collision risk is ${c?.level || 'critical'} (Pc = ${(c?.probability || 2.31e-4).toExponential(2)}). Recommended action: Execute In-Track Posigrade burn.`,
+      questions: {
+        why_high_risk: `The predicted collision probability (Pc = ${(c?.probability || 2.31e-4).toExponential(2)}) exceeds the emergency action threshold (1.00e-04). Miss distance is ${c?.minDistanceM || 420} meters under high along-track position covariance.`,
+        why_selected_maneuver: `The system selected In-Track Posigrade (+1.20 m/s, 2.40 kg fuel) because it achieves required separation at TCA while minimizing propellant cost, dropping Pc to < 1.00e-12.`,
+        why_others_rejected: `Alternative candidate burns across radial and cross-track directions were rejected due to 3.5x higher fuel consumption or insufficient clearance along covariance axis.`,
+        post_maneuver_impact: `Executing the burn alters mean anomaly, expanding TCA clearance to 3,850 meters and achieving a > 1e8x risk reduction.`,
+        was_validated: `YES — Validated across 2,669 space catalog objects over a 24-hour horizon with 0 secondary threats detected.`,
+      },
+      shap_attributions: [
+        { feature: 'Miss Distance', impact: 'HIGH', weight_pct: 45.0, description: `Encounter miss distance is ${c?.minDistanceM || 420} m.` },
+        { feature: 'Orbit Uncertainty', impact: 'HIGH', weight_pct: 25.0, description: 'Position covariance based on SGP4 TLE uncertainty.' },
+        { feature: 'TCA Proximity', impact: 'HIGH', weight_pct: 15.0, description: 'Time to close approach is within critical 24h window.' },
+        { feature: 'Relative Speed', impact: 'MEDIUM', weight_pct: 10.0, description: 'Relative velocity is 14.80 km/s.' },
+        { feature: 'TLE Age', impact: 'LOW', weight_pct: 5.0, description: 'TLE telemetry age < 12 hours.' },
+      ],
+      candidate_tradeoffs: [
+        { candidate_id: 'burn-1', burn_type: 'In-Track Posigrade', dv_ms: 1.20, fuel_kg: 2.40, pc_after: 1e-12, status: 'SELECTED (RECOMMENDED)' },
+        { candidate_id: 'burn-2', burn_type: 'In-Track Retrograde', dv_ms: 1.85, fuel_kg: 3.70, pc_after: 2.5e-5, status: 'REJECTED', rejection_reason: 'Higher fuel consumption & insufficient clearance.' },
+        { candidate_id: 'burn-3', burn_type: 'Radial Outward', dv_ms: 4.50, fuel_kg: 9.00, pc_after: 1.2e-4, status: 'REJECTED', rejection_reason: 'Requires 3.7x higher delta-v and leaves Pc above safety target.' },
+      ],
+      validation_summary: { status: 'PASS', objects_screened: 2669, window_hours: 24, secondary_threats: 0 },
+    }, 'mock')
+  }
+}
+
 export const __base = BASE_URL
+

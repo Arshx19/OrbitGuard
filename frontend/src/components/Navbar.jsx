@@ -1,6 +1,7 @@
 import { NavLink } from 'react-router-dom'
-import { Radar, ListTree, Wrench, BarChart3, Database, Settings, Search, Satellite } from 'lucide-react'
+import { Radar, ListTree, Wrench, BarChart3, Database, Settings, Search, Satellite, RefreshCw } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { triggerRefresh } from '../api/orbitguard'
 
 const railItems = [
   { icon: Radar, label: 'Live' },
@@ -46,6 +47,17 @@ export function IconRail() {
 }
 
 export default function Navbar() {
+  const [isRefreshing, setIsRefreshing] = useState(false)
+
+  const handleManualRefresh = async () => {
+    setIsRefreshing(true)
+    await triggerRefresh()
+    setTimeout(() => {
+      setIsRefreshing(false)
+      window.dispatchEvent(new CustomEvent('orbitguard-data-refreshed'))
+    }, 600)
+  }
+
   return (
     <header className="flex h-14 shrink-0 items-center justify-between border-b border-line bg-void-700 px-5">
       <div className="flex items-center gap-8">
@@ -71,18 +83,27 @@ export default function Navbar() {
         </nav>
       </div>
 
-      <div className="flex items-center gap-5">
+      <div className="flex items-center gap-4">
         <div className="hidden md:flex items-center gap-2 rounded-md border border-line bg-void-600 px-3 py-1.5">
           <Search size={13} className="text-ink-faint" />
           <input
             placeholder="Search satellite / NORAD ID..."
-            className="w-48 bg-transparent text-xs text-ink placeholder:text-ink-faint focus:outline-none"
+            className="w-44 bg-transparent text-xs text-ink placeholder:text-ink-faint focus:outline-none"
           />
         </div>
+        <button
+          onClick={handleManualRefresh}
+          disabled={isRefreshing}
+          title="Trigger live catalog & conjunction re-screening"
+          className="flex items-center gap-1.5 rounded-md border border-line bg-void-600 px-2.5 py-1 text-xs text-ink-muted transition hover:bg-void-500 hover:text-ink disabled:opacity-50"
+        >
+          <RefreshCw size={12} className={isRefreshing ? 'animate-spin text-signal' : ''} />
+          <span className="hidden sm:inline font-mono text-[11px]">{isRefreshing ? 'SYNCING...' : 'LIVE REFRESH'}</span>
+        </button>
         <Clock />
         <div className="flex items-center gap-1.5">
           <span className="live-dot h-1.5 w-1.5 rounded-full bg-risk-green" />
-          <span className="text-xs font-medium text-risk-green">SYSTEM ONLINE</span>
+          <span className="text-xs font-medium text-risk-green">AUTO-SYNC ACTIVE</span>
         </div>
       </div>
     </header>

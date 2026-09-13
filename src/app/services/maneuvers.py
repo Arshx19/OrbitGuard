@@ -109,6 +109,7 @@ class Candidate:
     is_safe: bool = False
     rejection_reason: Optional[str] = None
     propellant_kg: float = 0.0
+    post_burn_timeline: List[Dict[str, object]] = field(default_factory=list)
 
     def to_dict(self, pc_before: float) -> Dict[str, object]:
         return {
@@ -129,6 +130,7 @@ class Candidate:
             "is_safe": self.is_safe,
             "rejection_reason": self.rejection_reason,
             "propellant_kg": self.propellant_kg,
+            "post_burn_timeline": self.post_burn_timeline,
         }
 
 
@@ -220,6 +222,22 @@ class ManeuverPlanner:
         candidate.new_tca_iso = from_jd(jd, fr).isoformat()
         candidate.pc_after = self.engine.probability(conj, method=method).pc
         candidate.propellant_kg = propellant_kg(candidate.delta_v_ms, event.primary.name)
+
+        post_burn_timeline = []
+        for offset_h in [-48, -36, -24, -12, -6, 0]:
+            t_fr = event.tca_fr + offset_h / 24.0
+            a_pos, _ = moved.state(event.tca_jd, t_fr)
+            b_pos, _ = secondary.state(event.tca_jd, t_fr)
+            dist = float(np.linalg.norm(a_pos - b_pos))
+            after_dist = round(dist, 3) if offset_h != 0 else round(candidate.new_miss_km, 3)
+            post_burn_timeline.append({
+                "t": f"T{offset_h:+d}" if offset_h else "T-0",
+                "hours": float(offset_h),
+                "distance_km": after_dist,
+                "after_km": after_dist,
+            })
+        candidate.post_burn_timeline = post_burn_timeline
+
         return moved
 
     def _rescreen(self, event: CloseApproach, candidate: Candidate, moved: ManeuveredTrack, now_jd, now_fr):

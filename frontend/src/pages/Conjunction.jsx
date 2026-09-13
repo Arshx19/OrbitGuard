@@ -4,6 +4,7 @@ import { conjunctions as defaultConjunctions, riskLevelMeta } from '../data/mock
 import { getConjunctionById, levelOf, formatProbability } from '../api/orbitguard'
 import SimulationBadge from '../components/SimulationBadge'
 import OrbitViewer from '../components/OrbitViewer'
+import ExplainMyDecision from '../components/ExplainMyDecision'
 
 export default function Conjunction() {
   const { id } = useParams()
@@ -20,7 +21,16 @@ export default function Conjunction() {
       }
     }
     loadDetail()
+    const interval = setInterval(loadDetail, 5000)
+    const handleRefreshed = () => loadDetail()
+    window.addEventListener('orbitguard-data-refreshed', handleRefreshed)
+
+    return () => {
+      clearInterval(interval)
+      window.removeEventListener('orbitguard-data-refreshed', handleRefreshed)
+    }
   }, [id])
+
 
   const meta = riskLevelMeta[levelOf(selected)] || riskLevelMeta.green
 
@@ -149,6 +159,9 @@ export default function Conjunction() {
           .
         </p>
       </div>
+
+      {/* AI Risk Copilot Decision Intelligence */}
+      <ExplainMyDecision conjunctionId={selected.id} className="mt-6" />
     </div>
   )
 }

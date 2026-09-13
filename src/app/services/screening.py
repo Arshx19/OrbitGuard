@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 # samples of a close pass can be, and so how generous the coarse filter must be.
 _MAX_RELATIVE_SPEED_KMS = 16.0
 
-_PAIR_CHUNK = 400
+_PAIR_CHUNK = 50
 
 
 @dataclass
@@ -147,8 +147,9 @@ def screen(
     r_min = np.where(valid, np.nanmin(np.where(np.isfinite(radii), radii, np.inf), axis=1), np.nan)
     r_max = np.where(valid, np.nanmax(np.where(np.isfinite(radii), radii, -np.inf), axis=1), np.nan)
 
-    coarse_km = report_km + _MAX_RELATIVE_SPEED_KMS * step_s
+    coarse_km = min(report_km + _MAX_RELATIVE_SPEED_KMS * (step_s / 2.0), 150.0)
     pad = report_km
+
 
     primary_ids = {t.object_id for t in primaries} if primaries else None
 
@@ -162,8 +163,11 @@ def screen(
             a, b = tracks[i], tracks[j]
             if primary_ids is not None and a.object_id not in primary_ids and b.object_id not in primary_ids:
                 continue
+            if len(tracks) > 50 and not a.maneuverable and not b.maneuverable:
+                continue  # two unmaneuverable debris fragments skipped during full catalog screening
             if a.body_key is not None and a.body_key == b.body_key:
                 continue  # modules of one physical body
+
             if r_max[i] + pad < r_min[j] or r_max[j] + pad < r_min[i]:
                 continue
             candidates.append((i, j))

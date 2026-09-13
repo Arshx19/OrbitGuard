@@ -6,6 +6,7 @@ import SimulationBadge from '../components/SimulationBadge'
 import ManeuverTable from '../components/ManeuverTable'
 import ManeuverViewer from '../components/ManeuverViewer'
 import ValidationPanel from '../components/ValidationPanel'
+import ExplainMyDecision from '../components/ExplainMyDecision'
 
 export default function ManeuverSimulator() {
   const { id } = useParams()
@@ -90,6 +91,9 @@ export default function ManeuverSimulator() {
         </div>
         <ValidationPanel status={status} candidate={candidate} conjunction={c} result={result} />
       </div>
+
+      {/* AI Risk Copilot Decision Intelligence */}
+      <ExplainMyDecision conjunctionId={c.id} candidateId={selectedCandidateId} className="mt-6" />
     </div>
   )
 }

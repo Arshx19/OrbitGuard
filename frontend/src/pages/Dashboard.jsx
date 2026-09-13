@@ -26,14 +26,27 @@ export default function Dashboard() {
         if (liveConj) {
           setConjunctionsList(liveConj)
           setSource(liveConj.source)
-          if (liveConj[0]?.id) setSelectedId(liveConj[0].id)
+          if (liveConj[0]?.id) {
+            setSelectedId((prev) => (prev ? prev : liveConj[0].id))
+          }
         }
       } catch (e) {
         console.warn("Using fallback data for Dashboard:", e)
       }
     }
+
     loadLiveData()
+    const interval = setInterval(loadLiveData, 5000)
+
+    const handleRefreshed = () => loadLiveData()
+    window.addEventListener('orbitguard-data-refreshed', handleRefreshed)
+
+    return () => {
+      clearInterval(interval)
+      window.removeEventListener('orbitguard-data-refreshed', handleRefreshed)
+    }
   }, [])
+
 
   const selected = conjunctionsList.find((c) => String(c.id) === String(selectedId)) || conjunctionsList[0]
   if (!selected) {

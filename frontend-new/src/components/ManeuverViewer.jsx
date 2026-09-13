@@ -12,7 +12,7 @@ export default function ManeuverViewer({ conjunction, candidate }) {
         )}
       </div>
       <div className="flex-1">
-        <OrbitViewer conjunction={conjunction} maneuverPreview={!!candidate} />
+        <OrbitViewer conjunction={conjunction} candidate={candidate} maneuverPreview={!!candidate} />
       </div>
       {candidate && (
         <p className="mt-2 border-t border-line pt-2 text-[11px] leading-relaxed text-ink-faint">

@@ -9,4 +9,8 @@ router.get('/conjunctions', forward('get', () => '/conjunctions'));
 // GET /api/v1/conjunctions/:id
 router.get('/conjunctions/:id', forward('get', (req) => `/conjunctions/${encodeURIComponent(req.params.id)}`));
 
+// POST /api/v1/screening/refresh
+router.post('/screening/refresh', forward('post', () => '/screening/refresh'));
+
 module.exports = router;
+

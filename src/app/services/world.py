@@ -136,8 +136,11 @@ class World:
             started = time.perf_counter()
             now = datetime.now(timezone.utc)
 
-            groups = [g.strip() for g in os.environ.get(
-                "ORBITGUARD_GROUPS", ",".join(DEFAULT_GROUPS)).split(",") if g.strip()]
+            env_groups = os.environ.get("ORBITGUARD_GROUPS", "").strip()
+            if env_groups and env_groups != "stations,iridium-33-debris,cosmos-1408-debris":
+                groups = [g.strip() for g in env_groups.split(",") if g.strip()]
+            else:
+                groups = list(DEFAULT_GROUPS)
             allow_network = os.environ.get("ORBITGUARD_ALLOW_NETWORK", "0") == "1"
             window_hours = _env_float("ORBITGUARD_WINDOW_HOURS", 24.0)
             report_km = _env_float("ORBITGUARD_REPORT_KM", 25.0)
@@ -180,6 +183,7 @@ class World:
         for group in groups:
             try:
                 snapshot = client.fetch_group(group, allow_network=allow_network)
+                logger.info("Group %r fetched %d objects from cache_dir %s", group, len(snapshot.objects), client.cache_dir)
             except RuntimeError as exc:
                 logger.error("Catalog group %r unavailable: %s", group, exc)
                 continue
@@ -354,6 +358,9 @@ def get_world() -> World:
 
 def rebuild_world() -> World:
     global _world
+    from app.core.data_ingestion import clear_tle_cache
+    clear_tle_cache()
     with _world_lock:
         _world = World().build()
         return _world
+

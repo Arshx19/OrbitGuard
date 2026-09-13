@@ -305,6 +305,11 @@ class TLEParser:
 
 _GLOBAL_TLE_CACHE: dict = {}
 
+def clear_tle_cache():
+    global _GLOBAL_TLE_CACHE
+    _GLOBAL_TLE_CACHE.clear()
+
+
 
 class TLEDataIngestion:
     """Main class for ingesting TLE data from files."""

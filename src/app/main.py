@@ -19,13 +19,37 @@ from contextlib import asynccontextmanager
 # Add src directory to sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Set default groups to load team's 133 real CelesTrak tracked objects (20 stations + 110 iridium-33 + 3 cosmos-1408)
+os.environ["ORBITGUARD_GROUPS"] = os.environ.get("ORBITGUARD_GROUPS", "stations,iridium-33-debris,cosmos-1408-debris")
+
 from fastapi import FastAPI
+
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1 import router as api_v1_router
 from app.services.world import get_world, rebuild_world
 
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)-8s %(name)s: %(message)s")
 logger = logging.getLogger("orbitguard")
+
+
+import asyncio
+
+async def _auto_refresh_loop():
+    interval = float(os.environ.get("ORBITGUARD_AUTO_REFRESH_INTERVAL", "60"))
+    enabled = os.environ.get("ORBITGUARD_AUTO_REFRESH", "1") != "0"
+    if not enabled:
+        return
+    logger.info("Auto-refresh background worker initialized (interval: %.1fs)", interval)
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            logger.info("Performing scheduled real-time data & screening refresh...")
+            rebuild_world()
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.error("Auto-refresh worker encountered an error: %s", exc)
 
 
 @asynccontextmanager
@@ -33,7 +57,13 @@ async def lifespan(_app: FastAPI):
     world = get_world()
     logger.info("ORBITGUARD AI ready: %d objects, %d conjunctions, built in %.1f s.",
                 len(world.tracks), len(world.events), world.build_seconds)
-    yield
+    refresh_task = asyncio.create_task(_auto_refresh_loop())
+    try:
+        yield
+    finally:
+        refresh_task.cancel()
+        await asyncio.gather(refresh_task, return_exceptions=True)
+
 
 
 app = FastAPI(
