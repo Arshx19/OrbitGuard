@@ -116,6 +116,7 @@ class Candidate:
             "direction_name": self.direction_name,
             "axis": self.axis,
             "delta_v_magnitude_ms": self.delta_v_ms,
+            "delta_v_rtn_ms": (np.asarray(self.delta_v_rtn_kms) * 1000.0).tolist(),
             "burn_lead_hours": round(self.lead_hours, 3),
             "burn_time": self.burn_time_iso,
             "new_miss_distance_km": self.new_miss_km,
@@ -154,7 +155,8 @@ class ManeuverPlanner:
 
     # -- candidate construction --------------------------------------------
 
-    def _grid(self, event: CloseApproach, now_jd: float, now_fr: float) -> List[Candidate]:
+    def _grid(self, event: CloseApproach, now_jd: float, now_fr: float,
+              dv_bounds_ms: Optional[Tuple[float, float]] = None) -> List[Candidate]:
         r, _ = event.primary.state(event.tca_jd, event.tca_fr)
         period_s = 2.0 * math.pi * math.sqrt(float(np.linalg.norm(r)) ** 3 / MU_EARTH_KM3_S2)
         available_s = seconds_between(now_jd, now_fr, event.tca_jd, event.tca_fr)
@@ -168,6 +170,8 @@ class ManeuverPlanner:
                         continue
                     burn_jd, burn_fr = event.tca_jd, event.tca_fr - lead_s / 86400.0
                     for dv in DELTA_V_GRID_MS:
+                        if dv_bounds_ms and not (dv_bounds_ms[0] <= dv <= dv_bounds_ms[1]):
+                            continue
                         candidates.append(Candidate(
                             candidate_id=f"{axis}{sign}{dv:.2f}@{lead_orbits:g}",
                             axis=axis,
@@ -273,7 +277,8 @@ class ManeuverPlanner:
 
     # -- public --------------------------------------------------------------
 
-    def optimize(self, event: CloseApproach, now_jd: float, now_fr: float) -> Dict[str, object]:
+    def optimize(self, event: CloseApproach, now_jd: float, now_fr: float,
+                 dv_bounds_ms: Optional[Tuple[float, float]] = None) -> Dict[str, object]:
         """
         Search the candidate grid and return a short, decision-ready table.
 
@@ -291,7 +296,7 @@ class ManeuverPlanner:
         )
         pc_before = self.engine.probability(base_input).pc
 
-        grid = self._grid(event, now_jd, now_fr)
+        grid = self._grid(event, now_jd, now_fr, dv_bounds_ms)
         for candidate in grid:
             self._primary_outcome(event, candidate, now_jd, now_fr, method="chan")
 

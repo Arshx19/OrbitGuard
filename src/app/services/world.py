@@ -53,6 +53,14 @@ TIMELINE_HOURS = (-48, -36, -24, -12, -6, 0)
 SIMULATED_MISS_KM = 0.42
 SIMULATED_LEAD_HOURS = 4.2
 SIMULATED_PRIMARY_NORAD = 25544  # ISS (ZARYA)
+# The API contract types satellite ids as integers. 90001 lies outside the
+# range of catalogued objects; the event's simulated flag is what marks it.
+SIMULATED_SECONDARY_ID = 90001
+
+
+def event_id(index: int) -> str:
+    """Event ids follow the prototype's CONJ-001 scheme."""
+    return f"CONJ-{index:03d}"
 
 
 def _env_float(name: str, default: float) -> float:
@@ -101,6 +109,7 @@ class Event:
     timeline: List[Dict[str, float]]
     maneuver_cache: Optional[Dict[str, object]] = field(default=None, repr=False)
     maneuver_cached_at: float = 0.0
+    maneuver_cache_key: Optional[tuple] = None
 
 
 class World:
@@ -147,14 +156,14 @@ class World:
                 simulated = self._simulated_event(now)
                 if simulated is not None:
                     events[simulated.event_id] = simulated
+            first_screened = len(events) + 1
 
             approaches = screen(self.tracks, now, duration_hours=window_hours,
                                 step_s=30.0, report_km=report_km)
-            screened = [self._make_event(f"CJ-{i + 1:03d}", a, now, simulated=False)
-                        for i, a in enumerate(approaches)]
+            screened = [self._make_event("pending", a, now, simulated=False) for a in approaches]
             screened.sort(key=lambda e: e.assessment.risk_score, reverse=True)
             for index, event in enumerate(screened):
-                event.event_id = f"CJ-{index + 1:03d}"
+                event.event_id = event_id(first_screened + index)
                 events[event.event_id] = event
 
             self.events = events
@@ -210,7 +219,7 @@ class World:
         speed = float(np.linalg.norm(v))
 
         secondary = TwoBodyTrack(
-            object_id="SIM-DEB-1", name="SIMULATED DEBRIS", object_type="Debris",
+            object_id=str(SIMULATED_SECONDARY_ID), name="SIMULATED DEBRIS", object_type="Debris",
             object_class="debris_fragment", maneuverable=False, simulated=True,
             uncertainty_regime=REGIME_PASSIVE,
             epoch_jd=jd, epoch_fr=fr,
@@ -223,7 +232,7 @@ class World:
         if not found:
             logger.warning("Simulated conjunction did not screen as expected.")
             return None
-        return self._make_event("SIM-001", found[0], now, simulated=True)
+        return self._make_event(event_id(1), found[0], now, simulated=True)
 
     def _make_event(self, event_id: str, approach: CloseApproach, now: datetime, simulated: bool) -> Event:
         now_jd, now_fr = to_jd(now)
@@ -313,12 +322,16 @@ class World:
             "satellites_monitored": sum(1 for t in self.tracks if t.maneuverable),
         }
 
-    def maneuvers(self, event: Event, max_age_s: float = 300.0) -> Dict[str, object]:
+    def maneuvers(self, event: Event, dv_bounds_ms=None, max_age_s: float = 300.0) -> Dict[str, object]:
         with self._lock:
-            if event.maneuver_cache is None or time.time() - event.maneuver_cached_at > max_age_s:
+            key = tuple(dv_bounds_ms) if dv_bounds_ms else None
+            stale = time.time() - event.maneuver_cached_at > max_age_s
+            if event.maneuver_cache is None or stale or event.maneuver_cache_key != key:
                 now_jd, now_fr = self.now_jd()
-                event.maneuver_cache = self.planner.optimize(event.approach, now_jd, now_fr)
+                event.maneuver_cache = self.planner.optimize(
+                    event.approach, now_jd, now_fr, dv_bounds_ms=dv_bounds_ms)
                 event.maneuver_cached_at = time.time()
+                event.maneuver_cache_key = key
             return event.maneuver_cache
 
     def validate(self, event: Event, candidate_id: str) -> Dict[str, object]:
