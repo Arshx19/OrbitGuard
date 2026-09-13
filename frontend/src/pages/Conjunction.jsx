@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { conjunctions as defaultConjunctions, riskLevelMeta, levelFromScore } from '../data/mockData'
-import { getConjunctionById } from '../api/orbitguard'
+import { conjunctions as defaultConjunctions, riskLevelMeta } from '../data/mockData'
+import { getConjunctionById, levelOf, formatProbability } from '../api/orbitguard'
+import SimulationBadge from '../components/SimulationBadge'
 import OrbitViewer from '../components/OrbitViewer'
 
 export default function Conjunction() {
@@ -11,24 +12,9 @@ export default function Conjunction() {
   useEffect(() => {
     async function loadDetail() {
       try {
+        // getConjunctionById already returns the page's shape, live or mock.
         const item = await getConjunctionById(id)
-        if (item) {
-          setSelected({
-            id: item.id || item.conjunction_id || id,
-            primary: item.satellite1_name || item.primary || 'ISS (ZARYA)',
-            secondary: item.satellite2_name || item.secondary || 'COSMOS DEBRIS #1402',
-            tcaIn: item.tcaIn || '42 min',
-            minDistanceM: item.miss_distance_km !== undefined ? Math.round(item.miss_distance_km * 1000) : (item.minDistanceM || 320),
-            relVelocityKms: item.relative_speed_kms || item.relVelocityKms || 7.4,
-            probability: item.probability || 8.7e-2,
-            riskScore: item.risk_score || item.riskScore || 94,
-            geometry: item.geometry || 'Crossing',
-            uncertainty: item.uncertainty || 'High',
-            factors: item.factors || defaultConjunctions[0].factors,
-            timeline: item.timeline || defaultConjunctions[0].timeline,
-            maneuverCandidates: item.maneuverCandidates || defaultConjunctions[0].maneuverCandidates
-          })
-        }
+        if (item) setSelected(item)
       } catch (e) {
         console.warn("Error loading conjunction detail:", e)
       }
@@ -36,8 +22,7 @@ export default function Conjunction() {
     loadDetail()
   }, [id])
 
-  const level = levelFromScore(selected.riskScore || 94)
-  const meta = riskLevelMeta[level] || riskLevelMeta.critical
+  const meta = riskLevelMeta[levelOf(selected)] || riskLevelMeta.green
 
   return (
     <div className="space-y-5 p-5">
@@ -60,6 +45,7 @@ export default function Conjunction() {
         >
           {meta.label.toUpperCase()}
         </span>
+        <SimulationBadge show={selected.simulated} className="ml-2" />
       </div>
 
       {/* Orbit + Details */}
@@ -104,7 +90,7 @@ export default function Conjunction() {
                 className="font-mono"
                 style={{ color: meta.color }}
               >
-                {selected.probability ? selected.probability.toExponential(1) : '8.7e-2'}
+                {formatProbability(selected.probability)}
               </dd>
             </div>
 

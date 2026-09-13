@@ -2,6 +2,55 @@
 
 A space debris detection and collision avoidance AI prototype.
 
+## Running
+
+ORBITGUARD AI is three services: the React frontend (port 5173) talks to a
+Node.js server (port 5000), which forwards to the Python AI service (port 8000).
+Start them in this order, each in its own terminal, from the repository root.
+
+**1. Python AI service** (Python 3.12; the first line is one-time setup)
+
+```bash
+python -m venv .venv && .venv/Scripts/python.exe -m pip install -r requirements.txt
+.venv/Scripts/python.exe -m uvicorn app.main:app --app-dir src --port 8000
+```
+
+On macOS/Linux use `.venv/bin/python`. Startup screens the committed TLE
+catalog and assesses every close approach, which takes a couple of seconds.
+
+**2. Node.js server**
+
+```bash
+cd backend && npm install && npm start
+```
+
+**3. Frontend**
+
+```bash
+cd frontend && npm install && npm run dev
+```
+
+Then open http://localhost:5173. The dashboard footer says whether it is
+showing live results or mock data. Check the services with
+`GET http://localhost:5000/api/v1/health`; the Python API's interactive docs are
+at http://localhost:8000/docs.
+
+**Configuration.** Copy `.env.example`, `backend/.env.example` and
+`frontend/.env.example` to `.env` files next to them. `.env` files are
+gitignored: never commit credentials.
+
+**Tests**
+
+```bash
+.venv/Scripts/python.exe -m pytest
+.venv/Scripts/python.exe tests/test_problem_statement_compliance.py   # requirement-by-requirement report
+```
+
+**Data and models.** TLE snapshots from CelesTrak are cached in `data/raw/` so the
+system runs offline. Refresh them with `scripts/fetch_catalog.py`. The learned
+position-uncertainty model in `models/tle_uncertainty.json` is retrained with
+`scripts/train_uncertainty_model.py`.
+
 ## Project Structure
 
 ### Root Directories
@@ -90,13 +139,7 @@ A space debris detection and collision avoidance AI prototype.
 
 ## Getting Started
 
-1. Clone the repository.  
-2. Install backend dependencies: `pip install -r requirements.txt`.  
-3. (Optional) Install frontend dependencies: `cd frontend && npm install`.  
-4. Download sample TLE data into `data/raw/` (or use provided sample).  
-5. Run the backend: `uvicorn src.app.main:app --reload`.  
-6. Start the frontend: `cd frontend && npm start`.  
-7. Open `http://localhost:3000` in your browser.
+See [Running](#running) above.
 
 ## Development Guidelines
 

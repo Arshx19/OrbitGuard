@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { conjunctions as defaultConjunctions, stats as defaultStats, riskLevelMeta, levelFromScore } from '../data/mockData'
-import { getStats, listConjunctions } from '../api/orbitguard'
+import { conjunctions as defaultConjunctions, stats as defaultStats, riskLevelMeta } from '../data/mockData'
+import { getStats, listConjunctions, levelOf, formatProbability } from '../api/orbitguard'
+import SimulationBadge from '../components/SimulationBadge'
 import StatCard from '../components/StatCard'
 import OrbitViewer from '../components/OrbitViewer'
 import ConjunctionList from '../components/ConjunctionList'
@@ -11,27 +12,21 @@ export default function Dashboard() {
   const [statsData, setStatsData] = useState(defaultStats)
   const [conjunctionsList, setConjunctionsList] = useState(defaultConjunctions)
   const [selectedId, setSelectedId] = useState(defaultConjunctions[0].id)
+  const [source, setSource] = useState('mock')
 
   useEffect(() => {
     async function loadLiveData() {
       try {
+        // Counts of zero are real (no high-risk events is good news), so the
+        // results replace the placeholders outright rather than through ||.
         const liveStats = await getStats()
-        if (liveStats) {
-          setStatsData(prev => ({
-            ...prev,
-            objectsTracked: liveStats.objectsTracked || prev.objectsTracked,
-            activeConjunctions: liveStats.activeConjunctions || prev.activeConjunctions,
-            highRiskEvents: liveStats.highRiskEvents || prev.highRiskEvents,
-            satellitesMonitored: liveStats.satellitesMonitored || prev.satellitesMonitored
-          }))
-        }
-        
+        if (liveStats) setStatsData(liveStats)
+
         const liveConj = await listConjunctions()
-        if (liveConj && liveConj.length > 0) {
+        if (liveConj) {
           setConjunctionsList(liveConj)
-          if (liveConj[0] && liveConj[0].id) {
-            setSelectedId(liveConj[0].id)
-          }
+          setSource(liveConj.source)
+          if (liveConj[0]?.id) setSelectedId(liveConj[0].id)
         }
       } catch (e) {
         console.warn("Using fallback data for Dashboard:", e)
@@ -41,16 +36,18 @@ export default function Dashboard() {
   }, [])
 
   const selected = conjunctionsList.find((c) => String(c.id) === String(selectedId)) || conjunctionsList[0]
-  const level = levelFromScore(selected?.riskScore || 94)
-  const meta = riskLevelMeta[level] || riskLevelMeta.critical
+  if (!selected) {
+    return <div className="p-5 text-xs text-ink-faint">No upcoming conjunctions in the screening window.</div>
+  }
+  const meta = riskLevelMeta[levelOf(selected)] || riskLevelMeta.green
 
   return (
     <div className="space-y-5 p-5">
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard label="Objects tracked" value={statsData.objectsTracked ? statsData.objectsTracked.toLocaleString() : '12,482'} delta={statsData.objectsTrackedDelta || '+2.6%'} accent="text-risk-green" />
-        <StatCard label="Active conjunctions" value={statsData.activeConjunctions || 37} delta={statsData.activeConjunctionsDelta || '+6.1%'} accent="text-risk-amber" />
-        <StatCard label="High-risk events" value={statsData.highRiskEvents || 5} delta={statsData.highRiskEventsDelta || '+25%'} accent="text-risk-critical" />
-        <StatCard label="Satellites monitored" value={statsData.satellitesMonitored ? statsData.satellitesMonitored.toLocaleString() : '1,284'} delta={statsData.satellitesMonitoredDelta || '+0.3%'} accent="text-risk-green" />
+        <StatCard label="Objects tracked" value={(statsData.objectsTracked ?? 0).toLocaleString()} delta={statsData.objectsTrackedDelta ?? ''} accent="text-risk-green" />
+        <StatCard label="Active conjunctions" value={statsData.activeConjunctions ?? 0} delta={statsData.activeConjunctionsDelta ?? ''} accent="text-risk-amber" />
+        <StatCard label="High-risk events" value={statsData.highRiskEvents ?? 0} delta={statsData.highRiskEventsDelta ?? ''} accent="text-risk-critical" />
+        <StatCard label="Satellites monitored" value={(statsData.satellitesMonitored ?? 0).toLocaleString()} delta={statsData.satellitesMonitoredDelta ?? ''} accent="text-risk-green" />
       </div>
 
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-[1fr_320px]">
@@ -66,6 +63,7 @@ export default function Dashboard() {
             >
               {meta.label.toUpperCase()} CONJUNCTION
             </span>
+            <SimulationBadge show={selected.simulated} />
             <span className="font-mono text-[11px] text-ink-faint">{selected.id}</span>
           </div>
           <div className="text-sm font-medium text-ink">
@@ -83,7 +81,7 @@ export default function Dashboard() {
             </div>
             <div className="flex justify-between">
               <dt className="text-ink-faint">Collision probability</dt>
-              <dd className="font-mono" style={{ color: meta.color }}>{selected.probability ? selected.probability.toExponential(1) : '8.7e-2'}</dd>
+              <dd className="font-mono" style={{ color: meta.color }}>{formatProbability(selected.probability)}</dd>
             </div>
             <div className="flex justify-between">
               <dt className="text-ink-faint">Relative velocity</dt>
@@ -108,7 +106,11 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <ConjunctionList conjunctions={conjunctionsList} selectedId={selectedId} onSelect={setSelectedId} />
+      <ConjunctionList conjunctions={conjunctionsList} selectedId={selected.id} onSelect={setSelectedId} />
+
+      <div className="text-right font-mono text-[10px] text-ink-faint">
+        {source === 'live' ? 'LIVE · screened from public TLE data' : 'MOCK DATA · backend not reachable'}
+      </div>
 
       <RiskTimeline timeline={selected.timeline} />
     </div>

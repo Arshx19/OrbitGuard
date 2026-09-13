@@ -11,6 +11,7 @@ const satellitesRouter = require('./routes/satellites');
 const conjunctionsRouter = require('./routes/conjunctions');
 const riskRouter = require('./routes/risk');
 const maneuverRouter = require('./routes/maneuver');
+const { forward, PYTHON_AI_SERVICE_URL } = require('./lib/forward');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -25,9 +26,12 @@ app.get('/', (req, res) => {
     status: "online",
     system: "ORBITGUARD AI Node.js Express Backend",
     version: "1.0.0",
-    python_ai_service: process.env.PYTHON_AI_SERVICE_URL || "http://localhost:8000/api/v1"
+    python_ai_service: PYTHON_AI_SERVICE_URL
   });
 });
+
+// Python service health, relayed. Returns 503 if the service is unreachable.
+app.get('/api/v1/health', forward('get', () => '/health'));
 
 // Register API v1 routes
 app.use('/api/v1', satellitesRouter);
@@ -39,6 +43,7 @@ app.use('/api/v1', maneuverRouter);
 app.listen(PORT, () => {
   console.log(`====================================================`);
   console.log(`🚀 Node.js Express Backend running on http://localhost:${PORT}`);
-  console.log(`🤖 Connected to Python AI Service on http://localhost:8000`);
+  console.log(`🤖 Forwarding to Python AI Service at ${PYTHON_AI_SERVICE_URL}`);
+  console.log(`   (check it is up: GET http://localhost:${PORT}/api/v1/health)`);
   console.log(`====================================================`);
 });

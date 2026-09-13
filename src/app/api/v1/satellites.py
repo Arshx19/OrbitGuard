@@ -1,49 +1,28 @@
-"""Satellites API router serving real TLE data from data/raw/."""
+"""Satellites API router serving the tracked catalog.
 
-import os
-from typing import List
-from fastapi import APIRouter
+The catalog is the one screening runs over, so the counts here agree with the
+conjunctions endpoint. Element sets come from CelesTrak, cached in data/raw/.
+"""
 
-try:
-    from app.models.satellite import SatelliteListResponse, SatelliteSchema
-    from app.core.data_ingestion import TLEDataIngestion
-except ImportError:
-    from src.app.models.satellite import SatelliteListResponse, SatelliteSchema
-    from src.app.core.data_ingestion import TLEDataIngestion
+from fastapi import APIRouter, Query
+
+from app.api.v1.serializers import satellite_schema
+from app.models.satellite import SatelliteListResponse
+from app.services.world import get_world
 
 router = APIRouter()
 
-_data_dir = os.getenv("DATA_DIR", "data/raw")
-_ingestion = TLEDataIngestion(_data_dir)
-
 
 @router.get("/satellites", response_model=SatelliteListResponse)
-def get_satellites():
-    """List all tracked satellites and space debris in the TLE catalog."""
-    tle_objects = _ingestion.load_all_tle_files()
-
-    if not tle_objects:
-        return SatelliteListResponse(
-            total_tracked=0,
-            satellites=[]
-        )
-
-    satellites = []
-    # Slice first 50 objects for instant API response
-    for tle in tle_objects[:50]:
-        satellites.append(
-            SatelliteSchema(
-                satellite_number=tle.satellite_number,
-                name=tle.designation or f"SAT #{tle.satellite_number}",
-                international_designator=tle.international_designator or "UNKNOWN",
-                inclination_deg=tle.inclination,
-                eccentricity=tle.eccentricity,
-                mean_motion_orbits_per_day=tle.mean_motion,
-                epoch=tle.epoch.isoformat() if tle.epoch else "2026-09-12T12:00:00Z"
-            )
-        )
-
+def get_satellites(limit: int = Query(50, ge=0, le=5000, description="Maximum objects to list.")):
+    """List tracked satellites and debris, with dashboard counts from screening."""
+    world = get_world()
+    now_jd, now_fr = world.now_jd()
+    stats = world.stats()
     return SatelliteListResponse(
-        total_tracked=len(tle_objects),
-        satellites=satellites
+        total_tracked=stats["objects_tracked"],
+        satellites=[satellite_schema(t, now_jd, now_fr) for t in world.tracks[:limit]],
+        active_conjunctions=stats["active_conjunctions"],
+        high_risk_events=stats["high_risk_events"],
+        satellites_monitored=stats["satellites_monitored"],
     )

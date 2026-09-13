@@ -1,0 +1,313 @@
+{
+  "schema_version": 1,
+  "trained_at": "2026-09-12T21:02:05.740374+00:00",
+  "method": "Standard CelesTrak GP element sets propagated with SGP4 and differenced against CelesTrak Supplemental GP (operator-ephemeris-derived) element sets in the RTN frame; per-axis sigma(age) fitted by maximum likelihood with a Gaussian outlier component; growth order selected by 5-fold cross-validation grouped by satellite.",
+  "regimes": {
+    "passive": {
+      "description": "Objects that do not maneuver between element-set updates. Applied to debris, rocket bodies, and quiet satellites.",
+      "source": "learned from 2,250 measured errors on 750 satellites (oneweb, planet)",
+      "constellations": [
+        "oneweb",
+        "planet"
+      ],
+      "n_samples": 2250,
+      "n_objects": 750,
+      "trained_age_range_days": [
+        0.11284842699999999,
+        1.3439714220999999
+      ],
+      "growth_model": "linear",
+      "coefficients": {
+        "epoch_km": [
+          0.03571653231033951,
+          0.7496670092566226,
+          0.08927559658251942
+        ],
+        "growth_km_per_day": [
+          0.025029479381059826,
+          0.44931802531531134,
+          6.14421235332821e-06
+        ],
+        "curvature_km_per_day2": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "outlier_fraction": 0.020019632282717244,
+      "model_selection": {
+        "linear": {
+          "held_out_mean_nll": -0.7827933169803166,
+          "standard_error": 0.0945871019629804
+        },
+        "quadratic": {
+          "held_out_mean_nll": -0.7828657828888502,
+          "standard_error": 0.09463932263948256
+        }
+      },
+      "cross_validation": {
+        "folds": 5,
+        "held_out_mean_nll": -0.7827933169803166,
+        "held_out_nll_standard_error": 0.0945871019629804,
+        "coverage_learned": {
+          "radial": {
+            "1_sigma": 0.6324444444444445,
+            "2_sigma": 0.9555555555555555,
+            "3_sigma": 0.9804444444444445
+          },
+          "along_track": {
+            "1_sigma": 0.6302222222222222,
+            "2_sigma": 0.9591111111111111,
+            "3_sigma": 0.9773333333333334
+          },
+          "cross_track": {
+            "1_sigma": 0.6733333333333335,
+            "2_sigma": 0.9462222222222223,
+            "3_sigma": 0.9942222222222222
+          }
+        },
+        "coverage_assumed": {
+          "radial": {
+            "1_sigma": 0.9911111111111112,
+            "2_sigma": 0.9968888888888889,
+            "3_sigma": 0.9977777777777778
+          },
+          "along_track": {
+            "1_sigma": 0.764,
+            "2_sigma": 0.9564444444444445,
+            "3_sigma": 0.9808888888888887
+          },
+          "cross_track": {
+            "1_sigma": 0.9715555555555555,
+            "2_sigma": 0.9982222222222221,
+            "3_sigma": 1.0
+          }
+        },
+        "coverage_learned_by_constellation": {
+          "oneweb": {
+            "radial": {
+              "1_sigma": 0.6649597202197772,
+              "2_sigma": 0.9815051876468782,
+              "3_sigma": 0.9901529414074286
+            },
+            "along_track": {
+              "1_sigma": 0.5998621640054508,
+              "2_sigma": 0.9654523706861227,
+              "3_sigma": 0.9849256706013035
+            },
+            "cross_track": {
+              "1_sigma": 0.6407937736408347,
+              "2_sigma": 0.9446398788556859,
+              "3_sigma": 0.9968979051229707
+            }
+          },
+          "planet": {
+            "radial": {
+              "1_sigma": 0.41105889816034746,
+              "2_sigma": 0.782237837310301,
+              "3_sigma": 0.9224574244864101
+            },
+            "along_track": {
+              "1_sigma": 0.8332508661494169,
+              "2_sigma": 0.9170926657883178,
+              "3_sigma": 0.9290118577075098
+            },
+            "cross_track": {
+              "1_sigma": 0.8850836871126726,
+              "2_sigma": 0.9591411701556629,
+              "3_sigma": 0.9822866344605476
+            }
+          }
+        }
+      },
+      "sigma_comparison_km": {
+        "0.5_days": {
+          "radial": {
+            "learned": 0.04823127200086943,
+            "assumed": 0.2
+          },
+          "along_track": {
+            "learned": 0.9743260219142782,
+            "assumed": 1.05
+          },
+          "cross_track": {
+            "learned": 0.08927866868869608,
+            "assumed": 0.2
+          }
+        },
+        "1_days": {
+          "radial": {
+            "learned": 0.06074601169139934,
+            "assumed": 0.30000000000000004
+          },
+          "along_track": {
+            "learned": 1.198985034571934,
+            "assumed": 1.8
+          },
+          "cross_track": {
+            "learned": 0.08928174079487275,
+            "assumed": 0.30000000000000004
+          }
+        },
+        "2_days": {
+          "radial": {
+            "learned": 0.08577549107245916,
+            "assumed": 0.5
+          },
+          "along_track": {
+            "learned": 1.6483030598872452,
+            "assumed": 3.3
+          },
+          "cross_track": {
+            "learned": 0.08928788500722608,
+            "assumed": 0.5
+          }
+        }
+      }
+    },
+    "maneuvering": {
+      "description": "Satellites that maneuver every few days, so their element sets go stale quickly.",
+      "source": "learned from 9,000 measured errors on 3,000 satellites (starlink)",
+      "constellations": [
+        "starlink"
+      ],
+      "n_samples": 9000,
+      "n_objects": 3000,
+      "trained_age_range_days": [
+        0.3251441863000001,
+        1.7630199256
+      ],
+      "growth_model": "linear",
+      "coefficients": {
+        "epoch_km": [
+          0.22434235362715665,
+          0.1310774624360834,
+          0.1472454289097183
+        ],
+        "growth_km_per_day": [
+          0.018518244141236845,
+          9.733802784746569,
+          0.055114390700859654
+        ],
+        "curvature_km_per_day2": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "outlier_fraction": 0.06821477074676413,
+      "model_selection": {
+        "linear": {
+          "held_out_mean_nll": 4.0082396564398985,
+          "standard_error": 0.057653165328644125
+        },
+        "quadratic": {
+          "held_out_mean_nll": 4.0032879926940765,
+          "standard_error": 0.05807817725253456
+        }
+      },
+      "cross_validation": {
+        "folds": 5,
+        "held_out_mean_nll": 4.0082396564398985,
+        "held_out_nll_standard_error": 0.057653165328644125,
+        "coverage_learned": {
+          "radial": {
+            "1_sigma": 0.6987777777777778,
+            "2_sigma": 0.8837777777777778,
+            "3_sigma": 0.9334444444444445
+          },
+          "along_track": {
+            "1_sigma": 0.6483333333333332,
+            "2_sigma": 0.9031111111111111,
+            "3_sigma": 0.9411111111111111
+          },
+          "cross_track": {
+            "1_sigma": 0.6748888888888889,
+            "2_sigma": 0.9402222222222221,
+            "3_sigma": 0.99
+          }
+        },
+        "coverage_assumed": {
+          "radial": {
+            "1_sigma": 0.7366666666666667,
+            "2_sigma": 0.8933333333333333,
+            "3_sigma": 0.938111111111111
+          },
+          "along_track": {
+            "1_sigma": 0.20477777777777778,
+            "2_sigma": 0.35777777777777775,
+            "3_sigma": 0.4615555555555556
+          },
+          "cross_track": {
+            "1_sigma": 0.8192222222222222,
+            "2_sigma": 0.9802222222222221,
+            "3_sigma": 0.9954444444444442
+          }
+        },
+        "coverage_learned_by_constellation": {
+          "starlink": {
+            "radial": {
+              "1_sigma": 0.6987777777777778,
+              "2_sigma": 0.8837777777777778,
+              "3_sigma": 0.9334444444444445
+            },
+            "along_track": {
+              "1_sigma": 0.6483333333333332,
+              "2_sigma": 0.9031111111111111,
+              "3_sigma": 0.9411111111111111
+            },
+            "cross_track": {
+              "1_sigma": 0.6748888888888889,
+              "2_sigma": 0.9402222222222221,
+              "3_sigma": 0.99
+            }
+          }
+        }
+      },
+      "sigma_comparison_km": {
+        "0.5_days": {
+          "radial": {
+            "learned": 0.23360147569777506,
+            "assumed": 0.2
+          },
+          "along_track": {
+            "learned": 4.997978854809368,
+            "assumed": 1.05
+          },
+          "cross_track": {
+            "learned": 0.17480262426014814,
+            "assumed": 0.2
+          }
+        },
+        "1_days": {
+          "radial": {
+            "learned": 0.2428605977683935,
+            "assumed": 0.30000000000000004
+          },
+          "along_track": {
+            "learned": 9.864880247182652,
+            "assumed": 1.8
+          },
+          "cross_track": {
+            "learned": 0.20235981961057797,
+            "assumed": 0.30000000000000004
+          }
+        },
+        "2_days": {
+          "radial": {
+            "learned": 0.26137884190963034,
+            "assumed": 0.5
+          },
+          "along_track": {
+            "learned": 19.59868303192922,
+            "assumed": 3.3
+          },
+          "cross_track": {
+            "learned": 0.25747421031143763,
+            "assumed": 0.5
+          }
+        }
+      }
+    }
+  }
+}

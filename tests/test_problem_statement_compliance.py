@@ -2,8 +2,8 @@
 ================================================================================
 ORBITGUARD AI - PROBLEM STATEMENT COMPLIANCE & VERIFICATION SUITE
 ================================================================================
-This test script rigorously validates that the codebase satisfies all core
-and bonus requirements specified in the problem statement:
+This test script validates that the codebase satisfies all core and bonus
+requirements specified in the problem statement:
 
 1. [CORE] Ingest publicly available TLE data for a defined set of tracked objects.
 2. [CORE] Established propagation model (SGP4) to project future positions.
@@ -12,14 +12,18 @@ and bonus requirements specified in the problem statement:
 5. [CORE] Before/after trajectory comparison (predicted intersection vs. corrected).
 6. [BONUS] Rank multiple simultaneous conjunction events by urgency/severity.
 7. [BONUS] Estimate fuel-cost tradeoff of maneuver against collision probability.
+
+Every check runs the real pipeline on the committed CelesTrak catalog: nothing
+here asserts on values typed into the test itself. Each requirement prints the
+evidence it verified, so `python tests/test_problem_statement_compliance.py`
+doubles as a demonstration report.
 ================================================================================
 """
 
 import sys
 import os
-import io
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 import numpy as np
 
 # Ensure UTF-8 output on Windows consoles safely
@@ -30,43 +34,60 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
         pass
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+os.environ.setdefault("ORBITGUARD_ALLOW_NETWORK", "0")
 
-from app.core.data_ingestion import TLEParser, TLEDataIngestion, load_tle_from_string
-from app.core.propagation import OrbitalPropagator, propagate_single_tle
-from app.core.conjunction import ConjunctionDetector, ConjunctionResult
-from app.core.risk_engine import CollisionRiskModel, RiskFeatures, create_sample_risk_model
-from app.core.maneuver_optimizer import ManeuverOptimizer, compute_rtn_frame, rtn_to_eci_delta_v
-from app.core.validation import EnvironmentValidator
+from app.core.data_ingestion import load_tle_from_string
+from app.core.propagation import OrbitalPropagator
+from app.core.risk_engine import PC_THRESHOLD_CRITICAL, format_pc
+from app.core.tle_source import CelesTrakClient, tle_epoch_utc
+from app.services.maneuvers import PC_SAFE_TARGET, propellant_kg
+from app.services.tracks import ManeuveredTrack, clohessy_wiltshire
+from app.services.world import World
+
+ISS_TLE = """1 25544U 98067A   26255.48371528  .00014298  00000+0  25372-3 0  9993
+2 25544  51.6418 205.7891 0005721 110.2345 250.0123 15.49821456500124"""
+
+_WORLD = None
+
+
+def _world():
+    """Build the screened world once and share it across requirements."""
+    global _WORLD
+    if _WORLD is None:
+        _WORLD = World().build()
+    return _WORLD
 
 
 def test_core_requirement_1_tle_ingestion():
-    """Requirement 1: Public TLE Ingestion from CelesTrak/Space-Track data."""
+    """Requirement 1: Public TLE Ingestion from CelesTrak data."""
     print("\n" + "=" * 65)
-    print("▶ [REQUIREMENT 1] Public TLE Data Ingestion (CelesTrak / Space-Track)")
+    print("▶ [REQUIREMENT 1] Public TLE Data Ingestion (CelesTrak)")
     print("=" * 65)
 
-    # 1. Test parsing official ISS TLE (CelesTrak format)
-    iss_tle = """1 25544U 98067A   26255.48371528  .00014298  00000+0  25372-3 0  9993
-2 25544  51.6418 205.7891 0005721 110.2345 250.0123 15.49821456500124"""
-    
-    parsed_iss = load_tle_from_string(iss_tle)
+    # 1. Parse an official ISS element set.
+    parsed_iss = load_tle_from_string(ISS_TLE)
     assert parsed_iss is not None, "Failed to parse standard ISS TLE string"
     assert parsed_iss.satellite_number == 25544, "NORAD Catalog ID mismatch"
     assert parsed_iss.satrec is not None, "SGP4 Satrec record not generated"
     assert abs(parsed_iss.inclination - 51.6418) < 1e-4, "Inclination mismatch"
-    assert parsed_iss.epoch is not None, "Epoch calculation failed"
 
-    print(f"  ✓ Ingested TLE: NORAD ID {parsed_iss.satellite_number} ({parsed_iss.designation})")
+    # The epoch must be *correct*, not merely present: day 255.48 of 2026 is
+    # 12 September, 11:36 UTC.
+    epoch = tle_epoch_utc(parsed_iss)
+    assert (epoch.year, epoch.month, epoch.day, epoch.hour) == (2026, 9, 12, 11), f"Wrong epoch {epoch}"
+
+    print(f"  ✓ Ingested TLE: NORAD ID {parsed_iss.satellite_number}")
     print(f"    - Inclination: {parsed_iss.inclination:.4f}° | Mean Motion: {parsed_iss.mean_motion:.4f} rev/day")
-    print(f"    - Epoch: {parsed_iss.epoch} UTC | SGP4 Satrec initialized: {type(parsed_iss.satrec).__name__}")
+    print(f"    - Epoch: {epoch.isoformat()} (verified against day-of-year 255.48)")
 
-    # 2. Test reading from local raw TLE catalog directory (active_satellites.tle)
-    data_dir = os.path.join(os.path.dirname(__file__), '..', 'data', 'raw')
-    if os.path.exists(data_dir):
-        ingestion = TLEDataIngestion(data_dir)
-        catalog = ingestion.load_all_tle_files()
-        assert len(catalog) > 0, "No TLE files loaded from catalog"
-        print(f"  ✓ Ingested {len(catalog)} objects from active catalog files in {data_dir}")
+    # 2. Load the CelesTrak catalog snapshot the system screens.
+    client = CelesTrakClient()
+    objects = client.fetch_groups(["stations", "iridium-33-debris", "cosmos-1408-debris"], allow_network=False)
+    assert len(objects) > 100, f"Expected a real catalog, loaded {len(objects)} objects"
+    assert all(o.satrec is not None for o in objects), "Every catalog object needs an SGP4 record"
+    names = {o.object_name for o in objects}
+    assert any("ISS" in n for n in names), "Object names from the three-line format were not captured"
+    print(f"  ✓ Ingested {len(objects)} objects from the CelesTrak catalog snapshot, with names")
     print("  ★ RESULT: REQUIREMENT 1 FULLY COMPLIANT\n")
     return True
 
@@ -77,167 +98,151 @@ def test_core_requirement_2_sgp4_propagation():
     print("▶ [REQUIREMENT 2] SGP4 Trajectory Propagation Model")
     print("=" * 65)
 
-    tle_string = """1 25544U 98067A   26255.48371528  .00014298  00000+0  25372-3 0  9993
-2 25544  51.6418 205.7891 0005721 110.2345 250.0123 15.49821456500124"""
-    tle_data = load_tle_from_string(tle_string)
+    tle_data = load_tle_from_string(ISS_TLE)
     propagator = OrbitalPropagator()
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    horizon = now + timedelta(hours=6)
-    step = timedelta(minutes=30)
-
+    start = tle_epoch_utc(tle_data).replace(tzinfo=None)
+    horizon = start + timedelta(hours=6)
     times, positions = propagator.propagate_multiple_times(
-        tle_data.satrec, start_time=now, end_time=horizon, time_step=step
+        tle_data.satrec, start_time=start, end_time=horizon, time_step=timedelta(minutes=30)
     )
-
     assert len(positions) >= 12, "Propagation did not generate sufficient time steps"
-    
-    # Check physical plausibility of LEO orbit (radius ~ 6700 to 6900 km from Earth center)
     for pos in positions:
         r = np.linalg.norm(pos)
-        assert 6371.0 < r < 8000.0, f"Unphysical orbit radius {r:.1f} km outside Earth LEO boundary"
+        assert 6371.0 < r < 8000.0, f"Unphysical orbit radius {r:.1f} km"
 
-    first_r = positions[0]
-    last_r = positions[-1]
-    print(f"  ✓ SGP4 Propagated {len(positions)} orbital states from {now.strftime('%H:%M:%S')} to {horizon.strftime('%H:%M:%S')}")
-    print(f"    - Initial ECI Position: [{first_r[0]:.2f}, {first_r[1]:.2f}, {first_r[2]:.2f}] km (|r| = {np.linalg.norm(first_r):.1f} km)")
-    print(f"    - Final ECI Position:   [{last_r[0]:.2f}, {last_r[1]:.2f}, {last_r[2]:.2f}] km (|r| = {np.linalg.norm(last_r):.1f} km)")
+    velocity = propagator.calculate_velocity(tle_data.satrec, start)
+    speed = float(np.linalg.norm(velocity))
+    assert 7.5 < speed < 7.8, f"ISS orbital speed should be ~7.66 km/s, got {speed:.3f}"
+
+    print(f"  ✓ SGP4 propagated {len(positions)} states over 6 h")
+    print(f"    - |r| {np.linalg.norm(positions[0]):.1f} km -> {np.linalg.norm(positions[-1]):.1f} km")
+    print(f"    - Orbital speed at epoch: {speed:.3f} km/s")
     print("  ★ RESULT: REQUIREMENT 2 FULLY COMPLIANT\n")
     return True
 
 
 def test_core_requirement_3_conjunction_and_risk_scoring():
-    """Requirement 3: Close-approach detection threshold & AI Risk Scoring."""
+    """Requirement 3: Close-approach detection above a threshold, and risk scoring."""
     print("=" * 65)
-    print("▶ [REQUIREMENT 3] Conjunction Screening & AI Risk-Scoring Layer")
+    print("▶ [REQUIREMENT 3] Conjunction Screening & Risk-Scoring Layer")
     print("=" * 65)
 
-    detector = ConjunctionDetector(miss_distance_threshold=5.0)  # 5 km threshold
+    world = _world()
+    report_km = world.config["report_km"]
+    screened = [e for e in world.events.values() if not e.simulated]
+    assert screened, "Screening the real catalog found no close approaches"
+    assert all(e.approach.miss_distance_km <= report_km for e in screened), "Event reported above the threshold"
 
-    # Simulate close approach scenario (0.42 km miss distance)
-    tca_time = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=3)
-    pos_primary = np.array([4500.0, 5000.0, 700.0])
-    # Threat object passing 0.42 km away
-    pos_threat = pos_primary + np.array([0.25, 0.30, 0.15])
+    # Refinement: the reported miss is the true minimum, not a coarse sample.
+    refined_better = sum(e.approach.coarse_distance_km > e.approach.miss_distance_km for e in screened)
+    assert refined_better > 0, "TCA refinement never improved on the sampled minimum"
 
-    dist = np.linalg.norm(pos_primary - pos_threat)
-    assert dist < 1.0, "Test conjunction distance should be within close approach"
+    for event in screened + [world.events["CONJ-001"]]:
+        a = event.assessment
+        assert 0.0 <= a.pc <= 1.0 and 0.0 <= a.risk_score <= 100.0
+        assert a.severity in ("GREEN", "AMBER", "HIGH", "CRITICAL")
 
-    positions = {
-        25544: np.array([pos_primary]),
-        99901: np.array([pos_threat])
-    }
-    timestamps = [tca_time]
+    sim = world.events["CONJ-001"]
+    assert sim.simulated and sim.assessment.pc >= PC_THRESHOLD_CRITICAL, "Demo event should be CRITICAL"
 
-    events = detector.find_conjunctions_in_timeframe(positions, timestamps)
-    assert len(events) > 0, "Failed to flag conjunction above threshold"
-    event = events[0]
-    print(f"  ✓ Detected Close-Approach Event:")
-    print(f"    - Satellite 1: #{event.satellite1_id} vs Threat Debris: #{event.satellite2_id}")
-    print(f"    - TCA: {event.tca} | Miss Distance: {event.miss_distance:.3f} km (Threshold: 5.0 km)")
+    # Explainability: each factor is a real recomputation of the probability.
+    top = max(sim.assessment.factors, key=lambda f: f.contribution_percent)
+    assert top.counterfactual_pc < sim.assessment.pc, "Counterfactual should lower the probability"
 
-    # Evaluate AI Risk Scoring & SHAP Attribution
-    risk_engine = create_sample_risk_model()
-    rf = RiskFeatures()
-    rf.miss_distance = event.miss_distance
-    rf.relative_speed = 12.4  # km/s hypervelocity
-    rf.time_to_tca = 3.0       # hours
-    rf.radial_velocity = -0.6
-    rf.approach_angle = 88.0
-
-    risk_prob, risk_level = risk_engine.predict_risk(rf)
-    explanation = risk_engine.explain_prediction(rf)
-
-    assert risk_prob > 0.60, f"Expected critical risk for 0.42 km pass, got {risk_prob}"
-    assert risk_level.upper() in ["CRITICAL", "HIGH"], f"Risk level {risk_level} not elevated"
-    assert "shap_values" in explanation, "SHAP explainability missing"
-
-    print(f"  ✓ AI Risk Engine Evaluation:")
-    print(f"    - Collision Risk Score: {risk_prob * 100:.1f}/100 [Status: {risk_level.upper()}]")
-    print(f"    - Top SHAP Feature Driver: miss_distance_km ({explanation['shap_values'].get('miss_distance_km', 0):.3f})")
+    closest = min(screened, key=lambda e: e.approach.miss_distance_km)
+    print(f"  ✓ Screened {len(world.tracks)} objects: {len(screened)} real close approaches within {report_km:g} km")
+    print(f"    - Closest: {closest.approach.primary.name} vs {closest.approach.secondary.name}, "
+          f"{closest.approach.miss_distance_km:.3f} km (sampled {closest.approach.coarse_distance_km:.1f} km before refinement)")
+    print(f"  ✓ Risk layer on the simulated ISS event: Pc {sim.assessment.pc:.2e}, "
+          f"{sim.assessment.severity}, score {sim.assessment.risk_score:.1f}/100")
+    print(f"    - Top driver: {top.display_name} ({top.contribution_percent:.0f}%) — {top.explanation}")
     print("  ★ RESULT: REQUIREMENT 3 FULLY COMPLIANT\n")
     return True
 
 
 def test_core_requirement_4_avoidance_maneuver():
-    """Requirement 4: Concrete Recommended Avoidance Maneuver Computation & Justification."""
+    """Requirement 4: Concrete recommended avoidance maneuver, computed and justified."""
     print("=" * 65)
     print("▶ [REQUIREMENT 4] Avoidance Maneuver Optimization & Justification")
     print("=" * 65)
 
-    optimizer = ManeuverOptimizer()
-    tca = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=4)
-    burn_time = tca - timedelta(hours=2)
+    world = _world()
+    event = world.events["CONJ-001"]
+    plan = world.maneuvers(event)
+    best_id = plan["recommended_candidate_id"]
+    assert best_id is not None, "No safe maneuver found"
+    best = next(c for c in plan["candidates"] if c["candidate_id"] == best_id)
 
-    # Generate RTN candidates
-    candidates = optimizer.generate_candidate_grid(
-        burn_time=burn_time,
-        dv_min_ms=0.05,
-        dv_max_ms=1.0,
-        num_steps=5
-    )
+    assert best["is_safe"], "Recommended maneuver is not safe"
+    assert best["pc_after"] < PC_SAFE_TARGET < plan["pc_before"], "Maneuver does not bring Pc below target"
+    assert best["delta_v_magnitude_ms"] > 0 and best["burn_lead_hours"] > 0, "Maneuver must have magnitude and timing"
+    assert np.linalg.norm(best["delta_v_rtn_ms"]) == _approx(best["delta_v_magnitude_ms"]), "Direction vector inconsistent"
 
-    assert len(candidates) > 0, "No candidate maneuvers generated"
-    
-    # Verify RTN coordinate transformation
-    pos_ref = np.array([4500.0, 5000.0, 700.0])
-    vel_ref = np.array([-5.2, 4.8, 2.1])
-    u_r, u_t, u_n = compute_rtn_frame(pos_ref, vel_ref)
-    
-    # Orthonormality check
-    assert abs(np.dot(u_r, u_t)) < 1e-6, "Radial and Along-Track vectors not orthogonal"
-    assert abs(np.dot(u_t, u_n)) < 1e-6, "Along-Track and Cross-Track vectors not orthogonal"
-    assert abs(np.linalg.norm(u_t) - 1.0) < 1e-6, "Along-Track vector not normalized"
+    # Justification: the along-track burn's secular drift is 3 * dv * t (CW).
+    lead_s = best["burn_lead_hours"] * 3600.0
+    radius = float(np.linalg.norm(event.approach.primary_position_km))
+    n = math.sqrt(398600.4418 / radius ** 3)
+    whole_orbits = 2 * math.pi / n * round(lead_s * n / (2 * math.pi))
+    dr, _ = clohessy_wiltshire(np.array(best["delta_v_rtn_ms"]) / 1000.0, n, np.array([whole_orbits]))
+    if abs(best["delta_v_rtn_ms"][1]) > 0:
+        expected = 3.0 * abs(best["delta_v_rtn_ms"][1]) / 1000.0 * whole_orbits
+        assert abs(abs(dr[0, 1]) - expected) < 1e-6 * max(1.0, expected), "CW secular drift mismatch"
 
-    # Select optimal candidate (Along-Track pos burn, min delta-v providing safe miss distance)
-    along_track_candidates = [c for c in candidates if "Along-track" in c.direction_name]
-    best = along_track_candidates[1] if len(along_track_candidates) > 1 else along_track_candidates[0]
-
-    # Justification parameters
-    original_miss_km = 0.42
-    post_burn_miss_km = 4.85
-    dv_mag = best.delta_v_magnitude_ms
-
-    print(f"  ✓ Recommended Avoidance Maneuver:")
-    print(f"    - Burn Type: Impulsive Orbit Boost ({best.direction_name})")
-    print(f"    - Timing: {burn_time.strftime('%Y-%m-%d %H:%M:%S')} UTC (2.0 hours prior to TCA)")
-    print(f"    - Delta-v Vector [Radial, In-Track, Cross-Track]:")
-    print(f"      [{best.delta_v_rtn[0]:.3f}, {best.delta_v_rtn[1]:.3f}, {best.delta_v_rtn[2]:.3f}] m/s")
-    print(f"    - Total Delta-v Magnitude: {dv_mag:.3f} m/s ({dv_mag*1000:.1f} mm/s)")
-    print(f"    - Projected Miss Distance Increase: {original_miss_km:.2f} km -> {post_burn_miss_km:.2f} km (+{post_burn_miss_km - original_miss_km:.2f} km)")
-    print(f"    - Physics Justification: Applying +Δv along-track increases semi-major axis, modifying orbital")
-    print(f"      period and phasing satellite away from the conjunction collision point at TCA.")
+    print(f"  ✓ Searched {plan['candidates_evaluated']} candidates across direction, magnitude and timing")
+    print(f"  ✓ Recommended: {best['delta_v_magnitude_ms']:.2f} m/s {best['direction_name']}, "
+          f"{best['burn_lead_hours']:.2f} h before TCA")
+    print(f"    - Delta-v RTN: {[round(x, 3) for x in best['delta_v_rtn_ms']]} m/s")
+    print(f"    - Pc {plan['pc_before']:.2e} -> {best['pc_after']:.2e}; miss -> {best['new_miss_distance_km']:.2f} km")
+    print(f"    - Justification: an along-track burn changes the orbital period, so the spacecraft drifts "
+          f"3·Δv·t along track (Clohessy-Wiltshire)")
     print("  ★ RESULT: REQUIREMENT 4 FULLY COMPLIANT\n")
     return True
 
 
+def _approx(value, rel=1e-9):
+    class _Approx:
+        def __eq__(self, other):
+            return abs(other - value) <= rel * max(1.0, abs(value))
+    return _Approx()
+
+
 def test_core_requirement_5_before_after_trajectory_visualization():
-    """Requirement 5: Before / After Trajectory Separation Validation."""
+    """Requirement 5: Before / after trajectory separation, verified by re-propagation."""
     print("=" * 65)
     print("▶ [REQUIREMENT 5] Before / After Trajectory Separation Verification")
     print("=" * 65)
 
-    # Pre-maneuver trajectory intersection at TCA
-    nominal_sat_pos = np.array([4500.0, 5000.0, 700.0])
-    threat_pos = nominal_sat_pos + np.array([0.20, 0.25, 0.10])
-    nominal_miss = np.linalg.norm(nominal_sat_pos - threat_pos)
+    world = _world()
+    event = world.events["CONJ-001"]
+    plan = world.maneuvers(event)
+    result = world.validate(event, plan["recommended_candidate_id"])
 
-    # Post-maneuver perturbed trajectory (using +0.3 m/s along-track burn 2h prior)
-    # Δx = 2 * (Δv / n) * (1 - cos(n*dt)) + along-track drift ~ 4.5 km
-    maneuvered_sat_pos = nominal_sat_pos + np.array([1.2, 4.2, -0.8])
-    corrected_miss = np.linalg.norm(maneuvered_sat_pos - threat_pos)
+    before = event.approach.miss_distance_km
+    after = result["new_miss_distance_km"]
+    assert after > before, "Maneuver did not increase separation"
+    assert result["checks"]["catalog_rescreened"], "Post-maneuver trajectory was not re-screened"
+    assert result["checks"]["new_conjunctions"] == 0, "Maneuver created a new conjunction"
 
-    assert nominal_miss < 0.5, "Nominal trajectory must be in collision zone (< 500m)"
-    assert corrected_miss > 2.0, "Corrected trajectory must exceed standard 2km safe corridor"
+    # Independently re-propagate the maneuvered track at the original TCA.
+    a = event.approach
+    lead_days = result["burn_lead_hours"] / 24.0
+    moved = ManeuveredTrack(
+        object_id="check", name=a.primary.name, object_type=a.primary.object_type,
+        object_class=a.primary.object_class, base=a.primary,
+        burn_jd=a.tca_jd, burn_fr=a.tca_fr - lead_days,
+        delta_v_rtn_kms=np.array(result["delta_v_rtn_ms"]) / 1000.0,
+    )
+    r_moved, _ = moved.state(a.tca_jd, a.tca_fr)
+    r_base, _ = a.primary.state(a.tca_jd, a.tca_fr)
+    displacement = float(np.linalg.norm(r_moved - r_base))
+    assert displacement > 0.5, f"Maneuvered trajectory barely moved ({displacement:.3f} km)"
 
-    print(f"  ✓ Pre-Maneuver State:")
-    print(f"    - Nominal Sat ECI: [{nominal_sat_pos[0]:.2f}, {nominal_sat_pos[1]:.2f}, {nominal_sat_pos[2]:.2f}] km")
-    print(f"    - Threat Object ECI: [{threat_pos[0]:.2f}, {threat_pos[1]:.2f}, {threat_pos[2]:.2f}] km")
-    print(f"    - Intersection Distance: {nominal_miss * 1000:.1f} m (< 500m CRITICAL)")
-    print(f"  ✓ Post-Maneuver State:")
-    print(f"    - Corrected Sat ECI: [{maneuvered_sat_pos[0]:.2f}, {maneuvered_sat_pos[1]:.2f}, {maneuvered_sat_pos[2]:.2f}] km")
-    print(f"    - Corrected Miss Distance: {corrected_miss:.2f} km (Cleared Safe Zone: > 2.0 km)")
-    print(f"    - Separation Factor: {corrected_miss / nominal_miss:.1f}x increase in miss distance")
+    print(f"  ✓ Before: {a.primary.name} vs {a.secondary.name}, miss {before:.3f} km at TCA")
+    print(f"  ✓ After:  miss {after:.2f} km; maneuvered spacecraft displaced {displacement:.2f} km at the original TCA")
+    print(f"  ✓ Re-screened {result['checks']['catalog_objects_screened']} objects over "
+          f"{result['checks']['rescreen_horizon_hours']:g} h: {result['checks']['new_conjunctions']} new conjunctions")
+    print(f"    - Timeline before maneuver: " + ", ".join(f"{p['t']} {p['distance_km']:.1f} km" for p in event.timeline))
     print("  ★ RESULT: REQUIREMENT 5 FULLY COMPLIANT\n")
     return True
 
@@ -248,24 +253,29 @@ def test_bonus_1_multi_conjunction_ranking():
     print("▶ [BONUS 1] Multi-Conjunction Ranking by Urgency and Severity")
     print("=" * 65)
 
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    mock_events = [
-        {"id": "CONJ-001", "sat": "ISS", "threat": "COSMOS-1402", "miss_km": 0.42, "time_hours": 3.2, "score": 94.0},
-        {"id": "CONJ-002", "sat": "STARLINK-1007", "threat": "FENGYUN-312", "miss_km": 1.20, "time_hours": 6.8, "score": 78.0},
-        {"id": "CONJ-003", "sat": "WEATHER-SAT", "threat": "SL-12 R/B", "miss_km": 5.10, "time_hours": 18.0, "score": 45.0},
-        {"id": "CONJ-004", "sat": "ENVISAT", "threat": "ISS", "miss_km": 24.5, "time_hours": 36.0, "score": 12.0},
-    ]
+    world = _world()
+    ranked = world.active_events()
+    assert len(ranked) >= 2, "Need several simultaneous events to rank"
+    screened = [e for e in ranked if not e.simulated]
+    scores = [e.assessment.risk_score for e in screened]
+    assert scores == sorted(scores, reverse=True), "Screened events are not ordered by risk score"
 
-    # Composite Urgency-Severity Index: USI = Score / (sqrt(time_to_tca_hours) * miss_distance_km)
-    for e in mock_events:
-        e["urgency_rank_score"] = e["score"] / (math.sqrt(e["time_hours"]) * max(0.1, e["miss_km"]))
+    # Urgency modulates the score without changing the probability.
+    sim = world.events["CONJ-001"]
+    hours = sim.assessment.time_to_tca_hours
+    engine = world.engine
+    pc = sim.assessment.pc
+    soon = engine.retime(sim.assessment, 1.0).risk_score
+    later = engine.retime(sim.assessment, 60.0).risk_score
+    engine.retime(sim.assessment, hours)
+    assert soon > later and sim.assessment.pc == pc, "Urgency should raise priority, not probability"
 
-    ranked_events = sorted(mock_events, key=lambda x: x["urgency_rank_score"], reverse=True)
-
-    assert ranked_events[0]["id"] == "CONJ-001", "Highest severity & urgency event should rank first"
-    print(f"  ✓ Ranked {len(ranked_events)} simultaneous conjunction events:")
-    for rank, ev in enumerate(ranked_events, 1):
-        print(f"    #{rank} [{ev['id']}] {ev['sat']} vs {ev['threat']} | Risk: {ev['score']:.0f}/100 | TCA in: {ev['time_hours']}h | Miss: {ev['miss_km']:.2f}km (Urgency Index: {ev['urgency_rank_score']:.1f})")
+    print(f"  ✓ Ranked {len(ranked)} simultaneous events (simulated demo event pinned first):")
+    for rank, e in enumerate(ranked[:5], 1):
+        print(f"    #{rank} [{e.event_id}] {e.approach.primary.name} vs {e.approach.secondary.name} | "
+              f"{e.assessment.severity} {e.assessment.risk_score:.1f}/100 | Pc {format_pc(e.assessment.pc)} | "
+              f"TCA in {e.assessment.time_to_tca_hours:.1f} h")
+    print(f"  ✓ Same event scored {soon:.1f} at 1 h out vs {later:.1f} at 60 h out, probability unchanged")
     print("  ★ RESULT: BONUS 1 FULLY COMPLIANT\n")
     return True
 
@@ -276,31 +286,25 @@ def test_bonus_2_fuel_cost_tradeoff():
     print("▶ [BONUS 2] Fuel-Cost Tradeoff vs. Avoided Collision Probability")
     print("=" * 65)
 
-    # Satellite parameters (e.g. 1000 kg dry satellite with hydrazine monopropellant, Isp = 220 s)
-    dry_mass_kg = 1000.0
-    isp_s = 220.0
-    g0 = 9.80665  # m/s^2
+    world = _world()
+    event = world.events["CONJ-001"]
+    plan = world.maneuvers(event)
+    candidates = sorted(plan["candidates"], key=lambda c: c["delta_v_magnitude_ms"])
+    assert all(c["propellant_kg"] > 0 for c in candidates), "Every candidate needs a propellant cost"
 
-    delta_v_options = [0.10, 0.20, 0.30, 0.50, 1.00]  # m/s
-    initial_collision_prob = 1.2e-3  # 0.12% collision chance
+    # Tsiolkovsky: more delta-v always costs more propellant.
+    costs = [propellant_kg(dv, event.approach.primary.name) for dv in (0.05, 0.1, 0.3, 1.0)]
+    assert costs == sorted(costs), "Propellant cost should grow with delta-v"
 
-    print(f"  ✓ Maneuver Trade-off Analysis (Sat Mass: {dry_mass_kg:.0f} kg, Isp: {isp_s:.0f}s):")
-    print(f"    {'Δv (m/s)':<12} {'Propellant Mass (g)':<22} {'Residual Pc':<16} {'Risk Reduction':<16}")
-    print(f"    {'-'*12} {'-'*22} {'-'*16} {'-'*16}")
-
-    for dv in delta_v_options:
-        # Tsiolkovsky: Δm = m0 * (1 - exp(-Δv / (Isp * g0)))
-        fuel_mass_kg = dry_mass_kg * (1.0 - math.exp(-dv / (isp_s * g0)))
-        fuel_mass_grams = fuel_mass_kg * 1000.0
-        
-        # Miss distance scale roughly ~ 15 km per 1 m/s burn at 2h prior
-        new_miss_km = 0.42 + (dv * 14.5)
-        # Residual collision probability model ~ Pc0 * exp(-0.5 * (new_miss / sigma)^2)
-        residual_pc = initial_collision_prob * math.exp(-0.5 * (new_miss_km / 1.0)**2)
-        reduction_pct = (1.0 - residual_pc / initial_collision_prob) * 100.0
-
-        print(f"    {dv:<12.2f} {fuel_mass_grams:<22.2f} {residual_pc:<16.2e} {reduction_pct:<15.2f}%")
-
+    print(f"  ✓ Trade-off for {event.approach.primary.name} (Pc before {plan['pc_before']:.2e}, "
+          f"target {plan['safety_target']:.0e}):")
+    print(f"    {'Δv (m/s)':<10} {'Direction':<28} {'Propellant (kg)':<17} {'Pc after':<11} {'Safe'}")
+    for c in candidates:
+        print(f"    {c['delta_v_magnitude_ms']:<10.2f} {c['direction_name']:<28} {c['propellant_kg']:<17.1f} "
+              f"{c['pc_after']:<11.1e} {'yes' if c['is_safe'] else 'no'}")
+    best = next(c for c in candidates if c["candidate_id"] == plan["recommended_candidate_id"])
+    factor = plan["pc_before"] / max(best["pc_after"], 1e-12)
+    print(f"  ✓ Recommended burn spends {best['propellant_kg']:.1f} kg to reduce Pc by a factor of {factor:.1e}")
     print("  ★ RESULT: BONUS 2 FULLY COMPLIANT\n")
     return True
 

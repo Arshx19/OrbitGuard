@@ -1,104 +1,92 @@
-"""Maneuver optimization & validation API router."""
+"""Maneuver optimization & validation API router.
 
-from fastapi import APIRouter
-from datetime import datetime, timedelta, timezone
-import numpy as np
+Candidates are searched, not scripted. The planner (app.services.maneuvers) tries
+burns across direction, magnitude, and timing, propagates each with the
+Clohessy-Wiltshire equations, recomputes collision probability, and re-screens
+the cheapest safe option per axis against the whole catalog over 24 hours.
+`/maneuver/validate` runs that full check on one chosen candidate.
+"""
 
-from app.models.conjunction import (
-    ManeuverRequest,
-    ManeuverOptimizeResponse,
-    ManeuverCandidateSchema
-)
-from app.core.maneuver_optimizer import ManeuverOptimizer
+from fastapi import APIRouter, HTTPException
+
+from app.api.v1.serializers import candidate_schema
+from app.models.conjunction import ManeuverOptimizeResponse, ManeuverRequest, ValidationChecks
+from app.services.maneuvers import PC_SAFE_TARGET
+from app.services.world import get_world
 
 router = APIRouter()
-optimizer = ManeuverOptimizer()
+
+
+def _event(conjunction_id: str):
+    world = get_world()
+    event = world.events.get(conjunction_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail=f"Conjunction {conjunction_id} not found")
+    return world, event
+
+
+def _not_maneuverable(req: ManeuverRequest) -> ManeuverOptimizeResponse:
+    return ManeuverOptimizeResponse(
+        conjunction_id=req.conjunction_id,
+        optimal_candidate=None,
+        all_candidates=[],
+        reason="Neither object in this conjunction is maneuverable.",
+    )
 
 
 @router.post("/maneuver/optimize", response_model=ManeuverOptimizeResponse)
 def optimize_maneuver(req: ManeuverRequest):
-    """
-    Generate RTN candidate maneuvers and evaluate post-burn re-screening validation.
-    """
-    try:
-        tca_dt = datetime.fromisoformat(req.tca.replace('Z', '+00:00'))
-    except Exception:
-        tca_dt = datetime.now(timezone.utc) + timedelta(hours=4)
+    """Search for the minimum-delta-v burn that brings collision probability below target."""
+    world, event = _event(req.conjunction_id)
+    if not event.approach.primary.maneuverable:
+        return _not_maneuverable(req)
 
-    burn_time = tca_dt - timedelta(hours=2)  # 2 hours before TCA
-
-    # Generate grid
-    candidates = optimizer.generate_candidate_grid(
-        burn_time=burn_time,
-        dv_min_ms=req.dv_min_ms,
-        dv_max_ms=req.dv_max_ms,
-        num_steps=4
-    )
-
-    schema_candidates = []
-    optimal_cand = None
-
-    for idx, c in enumerate(candidates):
-        # Simulate realistic re-screening outcomes for demo
-        # Candidate 1 (0.10 m/s): fixes primary threat, BUT creates secondary collision -> REJECTED
-        if idx == 0:
-            c.new_miss_distance_km = 2.10
-            c.primary_threat_resolved = True
-            c.secondary_threats_detected = True
-            c.is_safe = False
-            c.rejection_reason = "Secondary collision detected with object 99905 (SL-12 ROCKET BODY) at 0.18 km"
-            status_str = "REJECTED"
-        # Candidate 2 (0.20 m/s): insufficient distance -> REJECTED
-        elif idx == 1:
-            c.new_miss_distance_km = 1.40
-            c.primary_threat_resolved = False
-            c.secondary_threats_detected = False
-            c.is_safe = False
-            c.rejection_reason = "Insufficient miss distance (1.40 km < 2.0 km safe threshold)"
-            status_str = "REJECTED"
-        # Candidate 3 (0.30 m/s Along-track): SAFE & MINIMUM DELTA-V -> ACCEPTED / VALIDATED
-        elif idx == 2:
-            c.new_miss_distance_km = 4.50
-            c.primary_threat_resolved = True
-            c.secondary_threats_detected = False
-            c.is_safe = True
-            c.rejection_reason = None
-            status_str = "VALIDATED"
-        else:
-            c.new_miss_distance_km = 6.20 + (idx * 0.5)
-            c.primary_threat_resolved = True
-            c.secondary_threats_detected = False
-            c.is_safe = True
-            c.rejection_reason = None
-            status_str = "VALIDATED"
-
-        schema_c = ManeuverCandidateSchema(
-            candidate_id=c.candidate_id,
-            direction_name=c.direction_name,
-            delta_v_magnitude_ms=c.delta_v_magnitude_ms,
-            delta_v_rtn_ms=c.delta_v_rtn.tolist(),
-            new_miss_distance_km=c.new_miss_distance_km,
-            primary_threat_resolved=c.primary_threat_resolved,
-            secondary_threats_detected=c.secondary_threats_detected,
-            is_safe=c.is_safe,
-            status=status_str,
-            rejection_reason=c.rejection_reason
-        )
-        schema_candidates.append(schema_c)
-
-        if c.is_safe and optimal_cand is None:
-            optimal_cand = schema_c
+    plan = world.maneuvers(event, dv_bounds_ms=(req.dv_min_ms, req.dv_max_ms))
+    target = plan["safety_target"]
+    recommended = plan["recommended_candidate_id"]
+    candidates = [candidate_schema(c, target, recommended) for c in plan["candidates"]]
 
     return ManeuverOptimizeResponse(
         conjunction_id=req.conjunction_id,
-        optimal_candidate=optimal_cand,
-        all_candidates=schema_candidates
+        optimal_candidate=next((c for c in candidates if c.recommended), None),
+        all_candidates=candidates,
+        candidates_evaluated=plan["candidates_evaluated"],
+        safety_target=target,
+        pc_before=plan["pc_before"],
+        reason=None if candidates else "No candidate burns fit the requested delta-v range and time available.",
     )
 
 
 @router.post("/maneuver/validate", response_model=ManeuverOptimizeResponse)
 def validate_maneuver(req: ManeuverRequest):
     """
-    Run post-maneuver re-screening validation pass across full environment catalog.
+    Re-propagate one candidate and re-screen the full catalog before accepting it.
+
+    Validates `candidate_id` if given, otherwise the recommended candidate.
     """
-    return optimize_maneuver(req)
+    world, event = _event(req.conjunction_id)
+    if not event.approach.primary.maneuverable:
+        return _not_maneuverable(req)
+
+    candidate_id = req.candidate_id
+    if not candidate_id:
+        plan = world.maneuvers(event, dv_bounds_ms=(req.dv_min_ms, req.dv_max_ms))
+        candidate_id = plan["recommended_candidate_id"]
+        if not candidate_id:
+            raise HTTPException(status_code=409, detail="No safe candidate to validate.")
+
+    try:
+        result = world.validate(event, candidate_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Candidate {candidate_id} not found")
+
+    validated = candidate_schema(result, PC_SAFE_TARGET)
+    return ManeuverOptimizeResponse(
+        conjunction_id=req.conjunction_id,
+        optimal_candidate=validated if validated.is_safe else None,
+        all_candidates=[validated],
+        safety_target=PC_SAFE_TARGET,
+        pc_before=result["pc_before"],
+        validated_candidate=validated,
+        checks=ValidationChecks(**result["checks"]),
+    )
