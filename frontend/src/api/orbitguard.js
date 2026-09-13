@@ -1,163 +1,279 @@
 // Frontend <-> Backend API contract (spec section 11).
 // Connects to Node.js Express server (Port 5000) with fallback to local mock data.
+//
+// Every function returns data in the shape the pages and components use. When
+// the backend answers, the data is the computed result: screened conjunctions,
+// collision probabilities, counterfactual risk factors, searched maneuvers. When
+// it does not, the local mock data is used so the UI still renders -- and the
+// result is tagged `source: 'mock'` so the page can say so instead of passing
+// mock numbers off as real ones.
+//
+// Two things to know when rendering live data:
+//
+// 1. Zero is a real value. A distant, safe conjunction has a risk score of 0
+//    and can have a collision probability that underflows to 0. Fallbacks must
+//    use `??`, not `||`: `0 || 94` is 94, which would show a safe event as
+//    CRITICAL.
+//
+// 2. A risk factor can have a negative contribution (direction 'reduces').
+//    Large position uncertainty spreads the probability out and can lower it.
+//    Use `magnitude` for bar widths.
 
-import { stats, conjunctions, getConjunction } from '../data/mockData'
+import { stats, conjunctions, getConjunction, levelFromScore } from '../data/mockData'
 
 const BASE_URL = import.meta.env.VITE_API_URL || import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api/v1'
 
+// Long enough for a maneuver search with a whole-catalog re-screen.
+const REQUEST_TIMEOUT_MS = 25000
+
+// ---------------------------------------------------------------------------
+// Display helpers
+// ---------------------------------------------------------------------------
+
+/** Severity band, preferring the backend's probability-keyed level over bucketing the score. */
+export function levelOf(conjunction) {
+  return conjunction?.level ?? levelFromScore(conjunction?.riskScore ?? 0)
+}
+
+/**
+ * Display a collision probability. Values below 1e-12 are shown as a bound:
+ * that far into a Gaussian tail the figure is not a credible estimate.
+ */
+export function formatProbability(pc, digits = 1) {
+  if (pc == null || Number.isNaN(pc)) return '—'
+  if (pc < 1e-12) return '< 1e-12'
+  return pc.toExponential(digits)
+}
+
+export function formatTcaIn(hours) {
+  if (hours == null || Number.isNaN(hours)) return 'unknown'
+  if (hours < 0) return 'elapsed'
+  const totalMinutes = Math.round(hours * 60)
+  const h = Math.floor(totalMinutes / 60)
+  const m = totalMinutes % 60
+  if (h === 0) return `${m} min`
+  if (m === 0) return `${h} hr`
+  return `${h} hr ${m} min`
+}
+
+function uncertaintyBand(sigmaAlongTrackKm) {
+  if (sigmaAlongTrackKm == null) return 'Unknown'
+  if (sigmaAlongTrackKm < 0.75) return 'Low'
+  if (sigmaAlongTrackKm < 2.5) return 'Moderate'
+  return 'High'
+}
+
+// ---------------------------------------------------------------------------
+// Mapping from the API contract to the UI shape (pure; exported for testing)
+// ---------------------------------------------------------------------------
+
+export function mapFactor(f) {
+  const pct = Number(f.contribution_percentage ?? f.pct ?? 0)
+  const rounded = Number(pct.toFixed(1))
+  return {
+    label: f.factor ?? f.label ?? 'Unknown factor',
+    pct: rounded,
+    magnitude: Math.abs(rounded),
+    direction: f.direction ?? 'raises',
+    explanation: f.explanation ?? '',
+  }
+}
+
+export function mapConjunction(item) {
+  if (!item) return null
+  const sigma = item.uncertainty?.primary_sigma_along_track_km
+  return {
+    id: item.id,
+    primaryId: item.satellite1_id,
+    secondaryId: item.satellite2_id,
+    primary: item.satellite1_name,
+    secondary: item.satellite2_name,
+    primaryType: item.satellite1_type ?? 'Unknown',
+    secondaryType: item.satellite2_type ?? 'Unknown',
+    maneuverable: item.maneuverable,
+    simulated: Boolean(item.simulated),
+    tca: item.tca,
+    tcaHours: item.time_to_tca_hours,
+    tcaIn: formatTcaIn(item.time_to_tca_hours),
+    minDistanceM: Math.round(Number(item.miss_distance_km) * 1000),
+    missDistanceKm: item.miss_distance_km,
+    relVelocityKms: item.relative_speed_kms == null ? undefined : Number(item.relative_speed_kms.toFixed(2)),
+    probability: item.collision_probability,
+    riskScore: Math.round(Number(item.risk_score ?? 0)),
+    level: typeof item.risk_level === 'string' ? item.risk_level.toLowerCase() : undefined,
+    geometry: item.geometry,
+    uncertainty: uncertaintyBand(sigma),
+    uncertaintySource: item.uncertainty?.primary_model_source,
+    uncertaintyExtrapolated: Boolean(item.uncertainty?.extrapolated),
+    narrative: item.narrative,
+    timeline: Array.isArray(item.timeline)
+      ? item.timeline.map((p) => ({ t: p.t, hours: p.hours, distanceKm: p.distance_km }))
+      : [],
+  }
+}
+
+export function mapCandidate(c) {
+  return {
+    id: c.candidate_id,
+    deltaV: c.delta_v_magnitude_ms,
+    direction: c.direction_name,
+    leadHours: c.burn_lead_hours,
+    newSeparationKm: c.new_miss_distance_km,
+    pcBefore: c.pc_before,
+    pcAfter: c.pc_after,
+    propellantKg: c.propellant_kg,
+    newRisk: c.secondary_threats_detected
+      ? c.secondary_threat_details?.find((t) => !t.is_original_threat)?.secondary_name ?? 'Original object, later pass'
+      : 'None detected',
+    status: c.is_safe ? 'SAFE' : 'REJECT',
+    recommended: Boolean(c.recommended),
+    reason: c.rejection_reason ?? 'Clears the event with no new conjunction introduced on re-screen.',
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Transport
+// ---------------------------------------------------------------------------
+
+async function request(path, options = {}) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  try {
+    const res = await fetch(`${BASE_URL}${path}`, {
+      headers: { 'Content-Type': 'application/json' },
+      ...options,
+      signal: controller.signal,
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return await res.json()
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function tagged(value, source) {
+  if (value && typeof value === 'object') value.source = source
+  return value
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
 export async function getStats() {
   try {
-    const res = await fetch(`${BASE_URL}/satellites`)
-    if (res.ok) {
-      const data = await res.json()
-      const totalSats = data.total_tracked || data.total || (data.satellites ? data.satellites.length : 2847)
-      return {
-        objectsTracked: totalSats,
-        objectsTrackedDelta: '+2.6%',
-        activeConjunctions: 4,
-        activeConjunctionsDelta: '+6.1%',
-        highRiskEvents: 2,
-        highRiskEventsDelta: '+25%',
-        satellitesMonitored: Math.round(totalSats * 0.45),
-        satellitesMonitoredDelta: '+0.3%'
-      }
-    }
+    const data = await request('/satellites?limit=0')
+    return tagged({
+      objectsTracked: data.total_tracked,
+      activeConjunctions: data.active_conjunctions,
+      highRiskEvents: data.high_risk_events,
+      satellitesMonitored: data.satellites_monitored,
+      // The backend has no history to compute trends from, so none are shown.
+      objectsTrackedDelta: '',
+      activeConjunctionsDelta: '',
+      highRiskEventsDelta: '',
+      satellitesMonitoredDelta: '',
+    }, 'live')
   } catch (e) {
-    console.warn("Using fallback data for getStats:", e)
+    console.warn('Using mock data for getStats:', e)
+    return tagged({ ...stats }, 'mock')
   }
-  return Promise.resolve(stats)
 }
 
 export async function listConjunctions() {
   try {
-    const res = await fetch(`${BASE_URL}/conjunctions`)
-    if (res.ok) {
-      const data = await res.json()
-      const list = Array.isArray(data) ? data : (data.conjunctions || [])
-      if (list.length > 0) {
-        return list.map((item, idx) => ({
-          id: item.id || item.conjunction_id || `CONJ-00${idx+1}`,
-          primary: item.satellite1_name || item.primary || 'ISS (ZARYA)',
-          primaryType: 'Active Satellite',
-          secondary: item.satellite2_name || item.secondary || 'COSMOS DEBRIS #1402',
-          secondaryType: 'Debris',
-          tca: item.tca || '2026-09-13T04:12:00Z',
-          tcaIn: item.tcaIn || '4 hr 12 min',
-          minDistanceM: item.miss_distance_km !== undefined ? Math.round(item.miss_distance_km * 1000) : (item.minDistanceM || 420),
-          relVelocityKms: item.relative_speed_kms || item.relVelocityKms || 12.4,
-          probability: item.probability || 8.7e-2,
-          riskScore: item.risk_score || item.riskScore || 94,
-          geometry: item.geometry || 'Crossing',
-          uncertainty: item.uncertainty || 'High',
-          factors: item.factors || [
-            { label: 'Minimum separation', pct: 32 },
-            { label: 'Relative velocity', pct: 24 },
-            { label: 'TCA urgency', pct: 20 },
-            { label: 'Orbital geometry', pct: 14 },
-            { label: 'Uncertainty', pct: 7 },
-            { label: 'Object characteristics', pct: 3 }
-          ],
-          timeline: item.timeline || [
-            { t: 'T-48', hours: -48, distanceKm: 85 },
-            { t: 'T-36', hours: -36, distanceKm: 70 },
-            { t: 'T-24', hours: -24, distanceKm: 55 },
-            { t: 'T-12', hours: -12, distanceKm: 43 },
-            { t: 'T-6', hours: -6, distanceKm: 35 },
-            { t: 'T-0', hours: 0, distanceKm: item.miss_distance_km || 0.42 }
-          ],
-          maneuverCandidates: item.maneuverCandidates || [
-            { id: 1, deltaV: 0.10, direction: 'Radial', newSeparationKm: 0.60, newRisk: 'ISS (ZARYA) ↔ COSMOS DEBRIS #1402', status: 'REJECT', reason: 'Fixes original conjunction but creates a new unsafe pass at 0.18 km.' },
-            { id: 2, deltaV: 0.20, direction: 'Along-track', newSeparationKm: 1.90, newRisk: 'None detected', status: 'REJECT', reason: 'Residual probability still above the safety threshold after re-screening.' },
-            { id: 3, deltaV: 0.30, direction: 'Along-track', newSeparationKm: 4.50, newRisk: 'None detected', status: 'SAFE', reason: 'Clears the original event and no new conjunction is introduced on re-screen.' },
-            { id: 4, deltaV: 0.50, direction: 'Cross-track', newSeparationKm: 6.10, newRisk: 'None detected', status: 'SAFE', reason: 'Safe, but uses more propellant than candidate #3 for no added margin.' }
-          ]
-        }))
-      }
-    }
+    const data = await request('/conjunctions')
+    return tagged((Array.isArray(data) ? data : []).map(mapConjunction), 'live')
   } catch (e) {
-    console.warn("Using fallback mock data for listConjunctions:", e)
+    console.warn('Using mock data for listConjunctions:', e)
+    return tagged([...conjunctions], 'mock')
   }
-  return Promise.resolve(conjunctions)
 }
 
 export async function getConjunctionById(id) {
   try {
-    const list = await listConjunctions()
-    const item = list.find(c => c.id === id || c.conjunction_id === id)
-    if (item) return item
+    const data = await request(`/conjunctions/${encodeURIComponent(id)}`)
+    return tagged(mapConjunction(data), 'live')
   } catch (e) {
-    console.warn("Using fallback data for getConjunctionById:", e)
+    console.warn('Using mock data for getConjunctionById:', e)
+    const mock = getConjunction(id)
+    return mock ? tagged({ ...mock }, 'mock') : null
   }
-  return Promise.resolve(getConjunction(id) || conjunctions[0])
 }
 
 export async function analyzeRisk(id) {
   try {
-    const res = await fetch(`${BASE_URL}/risk/analyze`, {
+    const data = await request('/risk/analyze', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conjunction_id: id })
+      body: JSON.stringify({ conjunction_id: id }),
     })
-    if (res.ok) {
-      const data = await res.json()
-      const mock = getConjunction(id)
-      return {
-        riskScore: data.risk_score ?? mock?.riskScore ?? 94,
-        factors: data.shap_factors ?? mock?.factors ?? [],
-        explanation: data.explanation_summary,
-        timeline: mock?.timeline ?? []
-      }
-    }
+    const conjunction = mapConjunction(data.conjunction)
+    return tagged({
+      ...(conjunction ?? {}),
+      riskScore: Math.round(Number(data.risk_score ?? 0)),
+      level: typeof data.risk_level === 'string' ? data.risk_level.toLowerCase() : undefined,
+      probability: data.collision_probability,
+      factors: (data.shap_factors ?? []).map(mapFactor),
+      explanation: data.explanation_summary,
+      uncertaintySource: data.uncertainty?.primary_model_source,
+      uncertaintyExtrapolated: Boolean(data.uncertainty?.extrapolated),
+    }, 'live')
   } catch (e) {
-    console.warn("Using fallback mock data for analyzeRisk:", e)
+    console.warn('Using mock data for analyzeRisk:', e)
+    const c = getConjunction(id)
+    return c ? tagged({ ...c }, 'mock') : null
   }
-  const c = getConjunction(id)
-  return Promise.resolve({ riskScore: c?.riskScore, factors: c?.factors, timeline: c?.timeline })
 }
 
 export async function optimizeManeuver(id) {
   try {
-    const res = await fetch(`${BASE_URL}/maneuver/optimize`, {
+    const data = await request('/maneuver/optimize', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conjunction_id: id })
+      body: JSON.stringify({ conjunction_id: id }),
     })
-    if (res.ok) {
-      const data = await res.json()
-      if (data.all_candidates && data.all_candidates.length > 0) {
-        return data.all_candidates
-      }
-    }
+    const rows = (data.all_candidates ?? []).map(mapCandidate)
+    rows.evaluated = data.candidates_evaluated
+    rows.recommendedId = data.optimal_candidate?.candidate_id ?? null
+    rows.reason = data.reason
+    return tagged(rows, 'live')
   } catch (e) {
-    console.warn("Using fallback mock data for optimizeManeuver:", e)
+    console.warn('Using mock data for optimizeManeuver:', e)
+    return tagged([...(getConjunction(id)?.maneuverCandidates ?? [])], 'mock')
   }
-  const c = getConjunction(id)
-  return Promise.resolve(c?.maneuverCandidates ?? [])
 }
 
 export async function validateManeuver(id, candidateId) {
   try {
-    const res = await fetch(`${BASE_URL}/maneuver/validate`, {
+    const data = await request('/maneuver/validate', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ conjunction_id: id, candidate_id: candidateId })
+      body: JSON.stringify({ conjunction_id: id, candidate_id: candidateId }),
     })
-    if (res.ok) {
-      const data = await res.json()
-      const opt = data.optimal_candidate
-      return {
-        validated: opt?.is_safe ?? true,
-        candidate: opt
-      }
-    }
+    const validated = data.validated_candidate
+    const checks = data.checks
+    return tagged({
+      validated: Boolean(validated?.is_safe),
+      candidate: validated ? mapCandidate(validated) : undefined,
+      pcBefore: data.pc_before,
+      pcAfter: validated?.pc_after,
+      pcAfterBelowFloor: validated?.pc_after != null && validated.pc_after < 1e-12,
+      reason: validated?.rejection_reason,
+      checks: checks && {
+        originalResolved: checks.original_conjunction_resolved,
+        trajectoryPropagated: checks.post_maneuver_trajectory_propagated,
+        catalogRescreened: checks.catalog_rescreened,
+        horizonHours: checks.rescreen_horizon_hours,
+        objectsScreened: checks.catalog_objects_screened,
+        newConjunctions: checks.new_conjunctions,
+      },
+    }, 'live')
   } catch (e) {
-    console.warn("Using fallback mock data for validateManeuver:", e)
+    console.warn('Using mock data for validateManeuver:', e)
+    const c = getConjunction(id)
+    const candidate = c?.maneuverCandidates.find((m) => m.id === candidateId)
+    return new Promise((resolve) =>
+      setTimeout(() => resolve(tagged({ validated: candidate?.status === 'SAFE', candidate }, 'mock')), 900)
+    )
   }
-  const c = getConjunction(id)
-  const candidate = c?.maneuverCandidates.find((m) => m.id === candidateId)
-  return new Promise((resolve) =>
-    setTimeout(() => resolve({ validated: candidate?.status === 'SAFE', candidate }), 900)
-  )
 }
 
 export const __base = BASE_URL

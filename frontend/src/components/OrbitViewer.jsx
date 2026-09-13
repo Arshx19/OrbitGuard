@@ -1,4 +1,5 @@
-import { riskLevelMeta, levelFromScore } from '../data/mockData'
+import { riskLevelMeta } from '../data/mockData'
+import { levelOf } from '../api/orbitguard'
 
 // Renders Earth at center, two orbit paths, the primary/secondary objects,
 // and highlights the closest-approach point. Optionally overlays a dashed
@@ -12,8 +13,7 @@ export default function OrbitViewer({ conjunction, maneuverPreview = false }) {
     )
   }
 
-  const level = levelFromScore(conjunction.riskScore || 94)
-  const meta = riskLevelMeta[level] || riskLevelMeta.critical
+  const meta = riskLevelMeta[levelOf(conjunction)] || riskLevelMeta.green
   const color = meta.color
 
   const cx = 250

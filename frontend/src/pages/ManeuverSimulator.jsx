@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useParams } from 'react-router-dom'
 import { conjunctions as defaultConjunctions, getConjunction } from '../data/mockData'
 import { optimizeManeuver, validateManeuver, getConjunctionById } from '../api/orbitguard'
+import SimulationBadge from '../components/SimulationBadge'
 import ManeuverTable from '../components/ManeuverTable'
 import ManeuverViewer from '../components/ManeuverViewer'
 import ValidationPanel from '../components/ValidationPanel'
@@ -12,6 +13,8 @@ export default function ManeuverSimulator() {
   const [c, setC] = useState(defaultC)
   const [selectedCandidateId, setSelectedCandidateId] = useState(null)
   const [status, setStatus] = useState('idle') // idle | running | validated | rejected
+  const [result, setResult] = useState(null)
+  const [searchInfo, setSearchInfo] = useState(null)
 
   useEffect(() => {
     async function loadManeuverData() {
@@ -19,21 +22,10 @@ export default function ManeuverSimulator() {
         const detail = await getConjunctionById(id)
         const candidates = await optimizeManeuver(id)
 
-        setC(prev => ({
-          ...prev,
-          id: detail?.id || detail?.conjunction_id || id,
-          primary: detail?.satellite1_name || prev.primary,
-          secondary: detail?.satellite2_name || prev.secondary,
-          maneuverCandidates: candidates && candidates.length > 0 ? candidates.map((cand, idx) => ({
-            id: cand.candidate_id || cand.id || idx + 1,
-            deltaV: cand.delta_v_magnitude_ms || cand.deltaV || 0.30,
-            direction: cand.direction_name || cand.direction || 'Along-track',
-            newSeparationKm: cand.new_miss_distance_km || cand.newSeparationKm || 4.50,
-            newRisk: cand.secondary_threats_detected ? 'Threat Detected' : 'None detected',
-            status: cand.is_safe || cand.status === 'SAFE' || cand.status === 'VALIDATED' ? 'SAFE' : 'REJECT',
-            reason: cand.rejection_reason || cand.reason || 'Clears the original event and no new conjunction is introduced on re-screen.'
-          })) : prev.maneuverCandidates
-        }))
+        // Both calls return the page's shape already. An empty candidate list is
+        // a real answer (e.g. debris-only events cannot maneuver), so it is kept.
+        setC(prev => ({ ...prev, ...(detail ?? {}), maneuverCandidates: candidates ?? [] }))
+        setSearchInfo({ evaluated: candidates?.evaluated, recommendedId: candidates?.recommendedId, reason: candidates?.reason })
       } catch (e) {
         console.warn("Error loading maneuver simulator live data:", e)
       }
@@ -47,23 +39,35 @@ export default function ManeuverSimulator() {
   function handleSelect(candidateId) {
     setSelectedCandidateId(candidateId)
     setStatus('idle')
+    setResult(null)
   }
 
   async function handleValidate() {
     if (!candidate) return
     setStatus('running')
-    const result = await validateManeuver(c.id, candidate.id)
-    setStatus(result.validated ? 'validated' : 'rejected')
+    const outcome = await validateManeuver(c.id, candidate.id)
+    setResult(outcome)
+    setStatus(outcome.validated ? 'validated' : 'rejected')
   }
 
   return (
     <div className="space-y-5 p-5">
       <div className="flex items-center justify-between">
         <div>
-          <div className="text-[11px] uppercase tracking-wide text-ink-faint">Maneuver simulator · {c.id}</div>
+          <div className="flex items-center gap-2 text-[11px] uppercase tracking-wide text-ink-faint">
+            Maneuver simulator · {c.id}
+            <SimulationBadge show={c.simulated} />
+          </div>
           <h1 className="mt-1 font-display text-lg font-semibold text-ink">
             Minimum-Δv response for {c.primary}
           </h1>
+          {searchInfo?.evaluated != null && (
+            <div className="mt-1 text-[11px] text-ink-faint">
+              {searchInfo.evaluated} candidates searched across magnitude, direction, and burn timing
+              {searchInfo.recommendedId && <> · recommended {searchInfo.recommendedId}</>}
+            </div>
+          )}
+          {searchInfo?.reason && <div className="mt-1 text-[11px] text-ink-faint">{searchInfo.reason}</div>}
         </div>
         <button
           onClick={handleValidate}
@@ -84,7 +88,7 @@ export default function ManeuverSimulator() {
         <div className="h-[320px]">
           <ManeuverViewer conjunction={c} candidate={candidate} />
         </div>
-        <ValidationPanel status={status} candidate={candidate} conjunction={c} />
+        <ValidationPanel status={status} candidate={candidate} conjunction={c} result={result} />
       </div>
     </div>
   )

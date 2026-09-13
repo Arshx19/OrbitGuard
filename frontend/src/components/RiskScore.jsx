@@ -1,8 +1,9 @@
 import { riskLevelMeta, levelFromScore } from '../data/mockData'
 
-export default function RiskScore({ score = 94 }) {
-  const level = levelFromScore(score)
-  const meta = riskLevelMeta[level] || riskLevelMeta.critical
+// `level` should come from the backend, which keys severity to collision
+// probability. Bucketing the score is only a fallback for mock data.
+export default function RiskScore({ score, level, probability }) {
+  const meta = riskLevelMeta[level ?? levelFromScore(score)]
   const circumference = 2 * Math.PI * 54
 
   return (
@@ -19,7 +20,7 @@ export default function RiskScore({ score = 94 }) {
             strokeWidth="10"
             strokeLinecap="round"
             strokeDasharray={circumference}
-            strokeDashoffset={circumference * (1 - (score || 94) / 100)}
+            strokeDashoffset={circumference * (1 - score / 100)}
           />
         </svg>
         <div className="absolute inset-0 flex flex-col items-center justify-center">
@@ -33,6 +34,11 @@ export default function RiskScore({ score = 94 }) {
       >
         {meta.label.toUpperCase()}
       </span>
+      {probability != null && (
+        <span className="font-mono text-[11px] text-ink-faint">
+          Pc {probability < 1e-12 ? '< 1e-12' : probability.toExponential(2)}
+        </span>
+      )}
     </div>
   )
 }
