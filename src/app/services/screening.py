@@ -8,13 +8,17 @@ vectors the risk engine needs.
 The method is the standard filter-then-refine pipeline:
 
   1. **Coarse propagation.** Every track is sampled on a uniform time grid.
-  2. **Radial-band filter.** A pair whose orbital radii never come within the
-     screening distance of each other over the window cannot conjunct, and is
-     discarded before any pairwise work. In a real catalog this removes the
-     large majority of pairs.
-  3. **Local minima.** For surviving pairs, sampled separation is scanned for
-     local minima.
-  4. **Refinement.** Each promising minimum is refined by bounded scalar
+  2. **Proximity filter.** At each sampled instant, a KD-tree over every
+     track's position that instant finds the pairs that are actually near
+     each other right then. A pair that is never near each other at any
+     sampled instant cannot conjunct, and is discarded before any per-pair
+     work.
+  3. **Local minima.** For each pair the filter did flag, the sampled
+     instants it was flagged at are grouped into separate encounters (two
+     objects on crossing orbits meet at both nodes, so one pair can have two
+     encounters in a day), and the closest sample within each becomes a
+     starting guess for refinement.
+  4. **Refinement.** Each starting guess is refined by bounded scalar
      minimisation of the exact separation, to sub-millisecond precision.
 
 Step 4 is not optional. At a relative speed of 12 km/s, two samples 30 seconds
@@ -24,17 +28,30 @@ sampled minimum -- as `app.core.conjunction.ConjunctionDetector` currently does
 -- makes every downstream number an artefact of the step size. This module is
 the replacement for that path; the older detector is left in place for its
 owner to retire.
+
+Step 2 used to be a 1-D radial-band check (do the two orbits' altitude ranges
+ever overlap?) followed by computing the *full* sampled separation curve for
+every pair that passed. That is correct, but it does not discriminate well --
+two objects at the same altitude pass the band check regardless of how far
+apart their orbital planes are, so most pairs in a real catalog survived it --
+and computing a full separation curve per survivor is O(pairs x samples). On a
+~2,000-object debris cloud that is millions of pairs times thousands of
+samples: it did not finish in a reasonable time. The KD-tree check is exact
+per instant (no plane is special-cased away) and turns the same test into
+O(samples x n log n), which is why it both filters harder and runs faster.
 """
 
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.optimize import minimize_scalar
+from scipy.spatial import cKDTree
 
 from app.services.tracks import TimeGrid, Track, from_jd
 
@@ -42,10 +59,14 @@ logger = logging.getLogger(__name__)
 
 # The fastest relative speed two Earth-orbiting objects can plausibly have is a
 # little over 15 km/s (head-on, in high LEO). It bounds how far apart two
-# samples of a close pass can be, and so how generous the coarse filter must be.
+# samples of a close pass can be, and so how generous the proximity filter and
+# the refinement bracket around each starting guess must be.
 _MAX_RELATIVE_SPEED_KMS = 16.0
 
-_PAIR_CHUNK = 400
+# Samples flagged by the proximity filter that are this many grid steps apart
+# or fewer are treated as the same encounter; a bigger gap means a separate
+# one (e.g. the other node of a crossing pair, half an orbit away).
+_ENCOUNTER_GAP_SAMPLES = 2
 
 
 @dataclass
@@ -105,6 +126,45 @@ def refine_tca(
     return float(result.x), float(result.fun)
 
 
+def _find_proximate_pairs(
+    positions: np.ndarray, coarse_km: float
+) -> Dict[Tuple[int, int], List[int]]:
+    """
+    For every sampled instant, find the track pairs within `coarse_km` of each
+    other right then, using a KD-tree over that instant's positions.
+
+    Returns:
+        Map from (i, j), i < j, to the sorted list of sample indices at which
+        that pair was within range. A pair absent from the map was never
+        close enough at any sampled instant.
+    """
+    n_tracks, n_steps, _ = positions.shape
+    valid = np.isfinite(positions).all(axis=2)  # (n_tracks, n_steps)
+
+    hits: Dict[Tuple[int, int], List[int]] = defaultdict(list)
+    for t in range(n_steps):
+        idx = np.nonzero(valid[:, t])[0]
+        if len(idx) < 2:
+            continue
+        tree = cKDTree(positions[idx, t, :])
+        for a, b in tree.query_pairs(r=coarse_km, output_type="ndarray"):
+            i, j = int(idx[a]), int(idx[b])
+            hits[(i, j) if i < j else (j, i)].append(t)
+    return hits
+
+
+def _encounters(sample_indices: List[int], gap: int = _ENCOUNTER_GAP_SAMPLES) -> List[List[int]]:
+    """Split a pair's flagged samples into separate encounters by time gap."""
+    ordered = sorted(sample_indices)
+    groups: List[List[int]] = [[ordered[0]]]
+    for t in ordered[1:]:
+        if t - groups[-1][-1] <= gap:
+            groups[-1].append(t)
+        else:
+            groups.append([t])
+    return groups
+
+
 def screen(
     tracks: Sequence[Track],
     start: datetime,
@@ -141,69 +201,42 @@ def screen(
     for i, track in enumerate(tracks):
         positions[i], _ = track.states(jd, fr)
 
-    # Radial band per track, ignoring failed samples.
-    radii = np.linalg.norm(positions, axis=-1)
-    valid = np.isfinite(radii).any(axis=1)
-    r_min = np.where(valid, np.nanmin(np.where(np.isfinite(radii), radii, np.inf), axis=1), np.nan)
-    r_max = np.where(valid, np.nanmax(np.where(np.isfinite(radii), radii, -np.inf), axis=1), np.nan)
-
     coarse_km = report_km + _MAX_RELATIVE_SPEED_KMS * step_s
-    pad = report_km
-
     primary_ids = {t.object_id for t in primaries} if primaries else None
 
-    candidates: List[Tuple[int, int]] = []
-    for i in range(len(tracks)):
-        if not valid[i]:
-            continue
-        for j in range(i + 1, len(tracks)):
-            if not valid[j]:
-                continue
-            a, b = tracks[i], tracks[j]
-            if primary_ids is not None and a.object_id not in primary_ids and b.object_id not in primary_ids:
-                continue
-            if a.body_key is not None and a.body_key == b.body_key:
-                continue  # modules of one physical body
-            if r_max[i] + pad < r_min[j] or r_max[j] + pad < r_min[i]:
-                continue
-            candidates.append((i, j))
-
+    pair_hits = _find_proximate_pairs(positions, coarse_km)
+    total_pairs = len(tracks) * (len(tracks) - 1) // 2
     logger.info(
-        "Screening %d tracks over %.1f h at %.0f s: %d of %d pairs pass the radial filter.",
-        len(tracks), duration_hours, step_s, len(candidates),
-        len(tracks) * (len(tracks) - 1) // 2,
+        "Screening %d tracks over %.1f h at %.0f s: %d of %d pairs come within "
+        "%.0f km of each other at some sampled instant.",
+        len(tracks), duration_hours, step_s, len(pair_hits), total_pairs, coarse_km,
     )
 
     approaches: List[CloseApproach] = []
-    for chunk_start in range(0, len(candidates), _PAIR_CHUNK):
-        chunk = candidates[chunk_start:chunk_start + _PAIR_CHUNK]
-        ia = np.array([p[0] for p in chunk])
-        ib = np.array([p[1] for p in chunk])
-        dist = np.linalg.norm(positions[ia] - positions[ib], axis=-1)  # (pairs, T)
-        dist = np.where(np.isfinite(dist), dist, np.inf)
+    for (i, j), sample_indices in pair_hits.items():
+        a, b = tracks[i], tracks[j]
+        if primary_ids is not None and a.object_id not in primary_ids and b.object_id not in primary_ids:
+            continue
+        if a.body_key is not None and a.body_key == b.body_key:
+            continue  # modules of one physical body
 
-        interior = dist[:, 1:-1]
-        is_min = (interior <= dist[:, :-2]) & (interior < dist[:, 2:]) & (interior < coarse_km)
-        pair_idx, time_idx = np.nonzero(is_min)
-
-        for p, k in zip(pair_idx, time_idx + 1):
-            a, b = tracks[ia[p]], tracks[ib[p]]
-            offset, miss = refine_tca(a, b, grid, int(k), step_s)
+        for encounter in _encounters(sample_indices):
+            k = min(encounter, key=lambda t: float(np.linalg.norm(positions[i, t] - positions[j, t])))
+            offset, miss = refine_tca(a, b, grid, k, step_s)
             if miss > report_km:
                 continue
 
             tca_jd, tca_fr = grid.at(offset)
-            if b.maneuverable and not a.maneuverable:
-                a, b = b, a
-            ra, va = a.state(tca_jd, tca_fr)
-            rb, vb = b.state(tca_jd, tca_fr)
+            primary, secondary = (b, a) if (b.maneuverable and not a.maneuverable) else (a, b)
+            rp, vp = primary.state(tca_jd, tca_fr)
+            rs, vs = secondary.state(tca_jd, tca_fr)
             approaches.append(
                 CloseApproach(
-                    primary=a, secondary=b, tca_jd=tca_jd, tca_fr=tca_fr,
+                    primary=primary, secondary=secondary, tca_jd=tca_jd, tca_fr=tca_fr,
                     miss_distance_km=miss,
-                    primary_position_km=ra, primary_velocity_kms=va,
-                    secondary_position_km=rb, secondary_velocity_kms=vb,
-                    coarse_distance_km=float(dist[p, k]),
+                    primary_position_km=rp, primary_velocity_kms=vp,
+                    secondary_position_km=rs, secondary_velocity_kms=vs,
+                    coarse_distance_km=float(np.linalg.norm(positions[i, k] - positions[j, k])),
                 )
             )
 
